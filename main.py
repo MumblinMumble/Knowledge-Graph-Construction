@@ -1,8 +1,10 @@
-from fastapi import FastAPI
+import json
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from neo4j import GraphDatabase
 from dotenv import load_dotenv
 import os
+
+from pydantic import BaseModel
 
 load_dotenv()
 app = FastAPI()
@@ -15,51 +17,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def get_db():
-    uri = os.getenv("NEO4J_URI")
-    user = os.getenv("NEO4J_USER")
-    password = os.getenv("NEO4J_PASSWORD")
-    return GraphDatabase.driver(uri, auth=(user, password))
+GRAPH_FILE = 'graph.json'
+
+class GraphData(BaseModel):
+    nodes: list
+    links: list
 
 @app.get("/graph")
-def read_graph():
-    driver = get_db()
-    query = "MATCH (n)-[r]->(m) RETURN n,r,m LIMIT 100"
-    with driver.session() as session:
-        result = session.run(query)
-        nodes_by_id = {}
-        links = []
+async def read_graph():
+    if not os.path.exists(GRAPH_FILE):
+        raise HTTPException(status_code=404, detail="Graph file not found")
+    with open(GRAPH_FILE, 'r') as f:
+        data = json.load(f)
+    # Map legacy 'links' to 'edges' for frontend
+    return { 'nodes': data.get('nodes', []), 'edges': data.get('links', []) }
 
-        for record in result:
-            n = record["n"]
-            m = record["m"]
-            rel = record["r"]
-
-            # Add or update node n
-            if n.id not in nodes_by_id:
-                nodes_by_id[n.id] = {
-                    "id": n.id,
-                    "labels": list(n.labels),
-                    "properties": dict(n)
-                }
-            # Add or update node m
-            if m.id not in nodes_by_id:
-                nodes_by_id[m.id] = {
-                    "id": m.id,
-                    "labels": list(m.labels),
-                    "properties": dict(m)
-                }
-
-            # Add the relationship
-            links.append({
-                "source": n.id,
-                "target": m.id,
-                "type": rel.type,
-                "properties": dict(rel)
-            })
-
-    # Return a list of node objects plus links
-    return {
-        "nodes": list(nodes_by_id.values()),
-        "links": links
-    }
+@app.post("/graph")
+async def write_graph(graph: GraphData):
+    out = { 'nodes': graph.nodes, 'links': graph.links }
+    with open(GRAPH_FILE, 'w') as f:
+        json.dump(out, f, indent=2)
+    return "Graph saved to graph.json"
