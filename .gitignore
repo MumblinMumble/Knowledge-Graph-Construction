@@ -1,3 +1,6 @@
 /kgc
 /__pycache__
-.env
+.prettierrc
+/.vscode
+/.venv
+/sample_graphs
