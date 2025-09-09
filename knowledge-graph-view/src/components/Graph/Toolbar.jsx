@@ -32,6 +32,7 @@ export default function Toolbar({
   onImportJSON,
   onDownloadJSON,
   onCopyJSON,
+  onImportRDF,
 }) {
   const [fileOpen, setFileOpen] = React.useState(false);
   const [addOpen, setAddOpen] = React.useState(false);
@@ -142,14 +143,17 @@ export default function Toolbar({
         >
           File ▾
         </button>
+
         {fileOpen && (
           <div style={menu}>
+            {/* Import JSON */}
             <label
               style={{
                 ...menuItem,
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: 6,
+                cursor: 'pointer',
               }}
             >
               Import Json
@@ -157,17 +161,20 @@ export default function Toolbar({
                 type="file"
                 accept=".json"
                 onChange={(e) => {
-                  onImportJSON(e);
+                  onImportJSON?.(e);
                   setFileOpen(false);
+                  e.target.value = '';
                 }}
                 style={{ display: 'none' }}
               />
             </label>
+
+            {/* Download / Copy JSON */}
             <button
               style={menuItem}
               onClick={() => {
                 setFileOpen(false);
-                onDownloadJSON();
+                onDownloadJSON?.();
               }}
             >
               Download Json
@@ -176,11 +183,36 @@ export default function Toolbar({
               style={menuItem}
               onClick={() => {
                 setFileOpen(false);
-                onCopyJSON();
+                onCopyJSON?.();
               }}
             >
               Copy JSON
             </button>
+
+            {/* Import RDF — same styling as Import Json */}
+            {onImportRDF && (
+              <label
+                style={{
+                  ...menuItem,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  cursor: 'pointer',
+                }}
+              >
+                Import RDF (.nt)
+                <input
+                  type="file"
+                  accept=".nt"
+                  onChange={(e) => {
+                    onImportRDF(e);
+                    setFileOpen(false);
+                    e.target.value = '';
+                  }}
+                  style={{ display: 'none' }}
+                />
+              </label>
+            )}
           </div>
         )}
       </div>

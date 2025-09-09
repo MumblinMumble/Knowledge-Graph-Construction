@@ -1,9 +1,9 @@
-// src/components/Graph/Graph.jsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import useVisNetwork from '../../hooks/useVisNetwork';
 import useLayout from '../../hooks/useLayout';
 import Toolbar from './Toolbar';
 import PropertyPanel from './PropertyPanel';
+import { parseRdfText } from '../../utils/rdf';
 import {
   QuickAddNodePopover,
   QuickAddEdgePopover,
@@ -23,15 +23,19 @@ export default function Graph() {
   // layout
   const [layoutMode, setLayoutMode] = useState('force');
   const { applyLayout } = useLayout(networkRef, network, graphData);
+
+  // suspend layout while we animate to a newly created node
+  const suspendLayoutRef = useRef(false);
   useEffect(() => {
+    if (suspendLayoutRef.current) return;
     applyLayout(layoutMode);
   }, [layoutMode, applyLayout, graphData.nodes.length]);
 
   // selection + panel positioning
   const [selected, setSelected] = useState(null); // { type:'Node'|'Edge', data }
   const [panelPos, setPanelPos] = useState({ x: 0, y: 0 });
-  const PANEL_W = 360,
-    PANEL_OFFSET = 12;
+  const PANEL_W = 360;
+  const PANEL_OFFSET = 12;
 
   // filters
   const [filters, setFilters] = useState([]);
@@ -45,7 +49,7 @@ export default function Graph() {
 
   // edge mode + popovers
   const [edgeFrom, setEdgeFrom] = useState(null);
-  const [quickAdd, setQuickAdd] = useState(null); // { x,y } DOM pos
+  const [quickAdd, setQuickAdd] = useState(null); // { x,y } DOM pos (container-relative)
   const [quickEdge, setQuickEdge] = useState(null); // { x,y, from,to } DOM pos
   const [edgeFormOpen, setEdgeFormOpen] = useState(false);
   const [edgeFormDefaults, setEdgeFormDefaults] = useState({
@@ -100,14 +104,15 @@ export default function Graph() {
   const clampToContainer = useCallback(
     (x, y) => {
       const c = networkRef.current;
-      const w = c?.clientWidth ?? 0,
-        h = c?.clientHeight ?? 0;
+      const w = c?.clientWidth ?? 0;
+      const h = c?.clientHeight ?? 0;
       const cx = Math.min(Math.max(x + PANEL_OFFSET, 8), Math.max(8, w - PANEL_W - 8));
       const cy = Math.min(Math.max(y + PANEL_OFFSET, 8), Math.max(8, h - 220));
       return { x: cx, y: cy };
     },
     [networkRef],
   );
+
   const setPopupNearNode = useCallback(
     (nodeId) => {
       if (!network) return;
@@ -118,6 +123,7 @@ export default function Graph() {
     },
     [clampToContainer, network],
   );
+
   const setPopupNearEdge = useCallback(
     (edge) => {
       if (!network) return;
@@ -130,6 +136,7 @@ export default function Graph() {
     },
     [clampToContainer, network],
   );
+
   const repositionPopup = useCallback(() => {
     if (!selected) return;
     if (selected.type === 'Node') setPopupNearNode(selected.data.id);
@@ -137,6 +144,7 @@ export default function Graph() {
   }, [selected, setPopupNearNode, setPopupNearEdge]);
 
   // interactions
+  const followRafRef = useRef(0);
   useEffect(() => {
     if (!network) return;
 
@@ -165,6 +173,7 @@ export default function Graph() {
     const onDblClick = (params) => {
       if (params.nodes?.length || params.edges?.length) return;
       const { DOM } = params.pointer;
+      // DOM is container-relative: perfect for DOMtoCanvas later
       setQuickAdd({ x: DOM.x, y: DOM.y });
     };
 
@@ -203,7 +212,14 @@ export default function Graph() {
       }
     };
 
-    const follow = () => repositionPopup();
+    const follow = () => {
+      if (!selected) return;
+      if (followRafRef.current) return;
+      followRafRef.current = requestAnimationFrame(() => {
+        followRafRef.current = 0;
+        repositionPopup();
+      });
+    };
 
     network.on('click', onClick);
     network.on('doubleClick', onDblClick);
@@ -214,6 +230,7 @@ export default function Graph() {
     window.addEventListener('resize', follow);
 
     return () => {
+      if (followRafRef.current) cancelAnimationFrame(followRafRef.current);
       network.off('click', onClick);
       network.off('doubleClick', onDblClick);
       network.off('oncontext', onContext);
@@ -230,6 +247,7 @@ export default function Graph() {
     notify,
     setPopupNearNode,
     setPopupNearEdge,
+    selected,
   ]);
 
   // ESC to close transient UI
@@ -253,6 +271,7 @@ export default function Graph() {
 
   // filters → hidden flags
   const applyActiveFilters = useCallback((filtersList) => {
+    if (!filtersList.length) return;
     setGraphData((prev) => {
       const allNodeIds = prev.nodes.map((n) => n.id);
       const allEdgeIds = prev.edges.map((e) => String(e.id));
@@ -322,6 +341,7 @@ export default function Graph() {
     });
   }, []);
   useEffect(() => {
+    if (!filters.length) return;
     applyActiveFilters(filters);
     setTimeout(() => network?.fit({ animation: { duration: 300 } }), 0);
   }, [filters, applyActiveFilters, network]);
@@ -338,8 +358,8 @@ export default function Graph() {
     reader.onload = ({ target }) => {
       try {
         const parsed = JSON.parse(target.result);
-        const rawNodes = parsed.nodes ?? [],
-          rawEdges = parsed.edges ?? parsed.links ?? [];
+        const rawNodes = parsed.nodes ?? [];
+        const rawEdges = parsed.edges ?? parsed.links ?? [];
         const nodes = rawNodes.map((n, i) => {
           const id = toIntIfNumeric(n.id ?? i + 1);
           const name = n.name ?? n.label ?? `Node ${id}`;
@@ -381,6 +401,58 @@ export default function Graph() {
       .catch(() => notify('Copy failed', 'error'));
   };
 
+  // --- RDF: import handler ---
+  const onImportRDF = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Pause auto layout so it won't fight the initial render
+    suspendLayoutRef.current = true;
+
+    const isTTL = file.name.toLowerCase().endsWith('.ttl');
+    const contentType = isTTL ? 'text/turtle' : 'application/n-triples';
+
+    const reader = new FileReader();
+    reader.onload = ({ target }) => {
+      try {
+        const { nodes, edges } = parseRdfText(target.result, contentType);
+
+        // Turn off physics & fancy layout before pushing a big dataset
+        if (network) {
+          network.setOptions({
+            physics: { enabled: false },
+            layout: { improvedLayout: false },
+            interaction: { hover: false },
+          });
+        }
+
+        // Single state update
+        setGraphData({ nodes, edges });
+
+        // After vis ingests it (next frame), fit once without animation
+        requestAnimationFrame(() => {
+          network?.fit({ animation: false });
+          // Re-enable interactions; keep physics off by default for performance
+          network?.setOptions({ interaction: { hover: true } });
+          // Let layout resume for future actions
+          suspendLayoutRef.current = false;
+          notify(
+            `RDF imported (${nodes.length} nodes, ${edges.length} edges)`,
+            'success',
+          );
+        });
+      } catch (err) {
+        console.error(err);
+        notify('Invalid RDF (.nt/.ttl) file', 'error');
+        suspendLayoutRef.current = false;
+      }
+    };
+    reader.readAsText(file);
+
+    // allow re-selecting the same file
+    e.target.value = '';
+  };
+
   // selection helpers for search bar
   const selectNodesAndEdges = (nodeIds, edgeIds = []) => {
     if (!network) return;
@@ -417,16 +489,17 @@ export default function Graph() {
     showPanelForEdge(ed.id);
   };
 
-  // add popover helpers
+  // add popover helpers (container-relative point near top center)
   const openAddNodePopoverNearTop = () => {
     const el = networkRef.current;
     const x = el ? Math.round(el.clientWidth / 2) : 40;
-    const y = (el?.offsetTop ?? 0) + 24;
+    const y = 24; // container-relative
     setQuickAdd({ x, y });
   };
+
   const openEdgeFormFromMenu = () => {
-    let from = '',
-      to = '';
+    let from = '';
+    let to = '';
     const sel = network?.getSelectedNodes?.() || [];
     if (sel.length >= 1) from = String(sel[0]);
     if (sel.length >= 2) to = String(sel[1]);
@@ -441,8 +514,8 @@ export default function Graph() {
       setErr('Node "id" must be an integer');
       return;
     }
-    const wasId = selected.data.id,
-      idChanged = newId !== wasId;
+    const wasId = selected.data.id;
+    const idChanged = newId !== wasId;
     if (idChanged && graphData.nodes.some((n) => n.id === newId)) {
       setErr(`Node id ${newId} already exists.`);
       return;
@@ -466,8 +539,8 @@ export default function Graph() {
   };
 
   const updateEdge = (data, setErr, done) => {
-    const from = Number(data.from),
-      to = Number(data.to);
+    const from = Number(data.from);
+    const to = Number(data.to);
     if (!Number.isInteger(from) || !Number.isInteger(to)) {
       setErr('Edge "from" and "to" must be integers');
       return;
@@ -518,8 +591,7 @@ export default function Graph() {
 
   // run example from help modal
   const runString = (cmd) => {
-    // just forwards to SearchBar via state we already pass; no local state needed
-    // left here for parity; SearchBar will call this when you press "Try"
+    // forwarded elsewhere
   };
 
   // fit
@@ -555,6 +627,7 @@ export default function Graph() {
         onImportJSON={onImportJSON}
         onDownloadJSON={downloadJSON}
         onCopyJSON={copyJSON}
+        onImportRDF={onImportRDF}
       />
 
       <div
@@ -584,25 +657,92 @@ export default function Graph() {
         pos={quickAdd}
         onCancel={() => setQuickAdd(null)}
         onAdd={(label) => {
+          // Pause layout so it won't fight the camera
+          suspendLayoutRef.current = true;
+
           const nextId =
             (graphData.nodes.length
               ? Math.max(...graphData.nodes.map((n) => Number(n.id) || 0))
               : 0) + 1;
+
+          // Compute spawn from popover (container-relative → canvas)
+          let spawn = null;
+          if (network && quickAdd?.x != null && quickAdd?.y != null) {
+            const p = network.DOMtoCanvas({ x: quickAdd.x, y: quickAdd.y + 8 });
+            spawn = { x: p.x, y: p.y };
+          }
+
+          // Create the node (pin so physics/layout doesn't yank it)
           const newNode = {
             id: nextId,
-            name: label?.trim() || `Node ${nextId}`,
-            label: label?.trim() || `Node ${nextId}`,
+            name: (label ?? '').trim() || `Node ${nextId}`,
+            label: (label ?? '').trim() || `Node ${nextId}`,
+            ...(spawn
+              ? { x: spawn.x, y: spawn.y, fixed: { x: true, y: true }, physics: false }
+              : {}),
           };
+
           setGraphData((prev) => ({
             nodes: [...prev.nodes, newNode],
             edges: prev.edges,
           }));
           setQuickAdd(null);
-          setTimeout(() => {
-            network?.selectNodes([String(nextId)], false);
-            setSelected({ type: 'Node', data: newNode });
-            setPopupNearNode(nextId);
-          }, 0);
+
+          // After vis draws the new state, force-center & zoom
+          requestAnimationFrame(() => {
+            if (!network) return;
+            const idStr = String(nextId);
+
+            const centerOnce = () => {
+              try {
+                // Ensure node is exactly at spawn (if provided)
+                if (spawn) {
+                  network.moveNode(idStr, spawn.x, spawn.y);
+                }
+                // Get the *actual* position vis is using now
+                const pos = network.getPositions([idStr])[idStr] || spawn;
+                if (!pos) return;
+
+                // Hard-center & zoom in
+                network.moveTo({
+                  position: pos,
+                  scale: 2.0, // adjust zoom level to taste
+                  animation: { duration: 600, easingFunction: 'easeInOutQuad' },
+                });
+
+                // Select & open panel
+                network.selectNodes([idStr], false);
+                setSelected({ type: 'Node', data: newNode });
+                setPopupNearNode(nextId);
+
+                // Re-enable layout after camera settles
+                setTimeout(() => {
+                  suspendLayoutRef.current = false;
+                }, 650);
+
+                // Let node rejoin physics on first drag
+                const unpinOnce = (params) => {
+                  if (params.nodes && params.nodes.map(String).includes(idStr)) {
+                    setGraphData((prev) => ({
+                      ...prev,
+                      nodes: prev.nodes.map((n) =>
+                        n.id === nextId ? { ...n, fixed: false, physics: true } : n,
+                      ),
+                    }));
+                    network.off('dragEnd', unpinOnce);
+                  }
+                };
+                network.on('dragEnd', unpinOnce);
+              } finally {
+                network.off('afterDrawing', centerOnce);
+              }
+            };
+
+            // One-time listener: run right after the next draw
+            network.on('afterDrawing', centerOnce);
+            network.redraw(); // ensure a draw happens
+          });
+
           notify(`Node ${nextId} added`, 'success');
         }}
       />
@@ -638,8 +778,8 @@ export default function Graph() {
         defaults={edgeFormDefaults}
         onClose={() => setEdgeFormOpen(false)}
         onSubmit={({ from, to, label }) => {
-          const f = parseInt(from, 10),
-            t = parseInt(to, 10);
+          const f = parseInt(from, 10);
+          const t = parseInt(to, 10);
           if (!Number.isInteger(f) || !Number.isInteger(t)) {
             notify('From/To must be integer node ids', 'error');
             return;
