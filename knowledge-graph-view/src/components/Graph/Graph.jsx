@@ -1,9 +1,11 @@
+// src/components/Graph/Graph.jsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { DataFactory, Writer } from 'n3';
 import useVisNetwork from '../../hooks/useVisNetwork';
 import useLayout from '../../hooks/useLayout';
 import Toolbar from './Toolbar';
 import PropertyPanel from './PropertyPanel';
-import { parseRdfText } from '../../utils/rdf';
+
 import {
   QuickAddNodePopover,
   QuickAddEdgePopover,
@@ -24,7 +26,7 @@ export default function Graph() {
   const [layoutMode, setLayoutMode] = useState('force');
   const { applyLayout } = useLayout(networkRef, network, graphData);
 
-  // suspend layout while we animate to a newly created node
+  // suspend layout while we animate or import
   const suspendLayoutRef = useRef(false);
   useEffect(() => {
     if (suspendLayoutRef.current) return;
@@ -36,6 +38,16 @@ export default function Graph() {
   const [panelPos, setPanelPos] = useState({ x: 0, y: 0 });
   const PANEL_W = 360;
   const PANEL_OFFSET = 12;
+
+  // import batching
+  const skipVisSyncRef = useRef(false); // skip the "map to vis + setData" effect during big imports
+  const isBigImportRef = useRef(false);
+  const BIG_IMPORT_THRESHOLD = 6000; // nodes+edges count to switch to batch mode (tweak)
+  const BATCH_SIZE_NODES = 3000;
+  const BATCH_SIZE_EDGES = 4000;
+
+  // export
+  const { namedNode, blankNode, literal, quad } = DataFactory;
 
   // filters
   const [filters, setFilters] = useState([]);
@@ -97,7 +109,8 @@ export default function Graph() {
 
   // push data to vis
   useEffect(() => {
-    if (network) network.setData({ nodes: visNodes, edges: visEdges });
+    if (!network || skipVisSyncRef.current) return;
+    network.setData({ nodes: visNodes, edges: visEdges });
   }, [network, visNodes, visEdges]);
 
   // positioning helpers
@@ -143,6 +156,31 @@ export default function Graph() {
     else setPopupNearEdge(selected.data);
   }, [selected, setPopupNearNode, setPopupNearEdge]);
 
+  // smooth camera helper + UI gate during animation
+  const isAnimatingCameraRef = useRef(false);
+  const animateTo = useCallback(
+    ({ position, scale, duration = 650, easing = 'easeInOutCubic' }) => {
+      if (!network) return;
+      isAnimatingCameraRef.current = true;
+
+      const prevInteraction = network?.options?.interaction || {};
+      network.setOptions({ interaction: { ...prevInteraction, hover: false } });
+
+      network.once('animationFinished', () => {
+        isAnimatingCameraRef.current = false;
+        network.setOptions({ interaction: { ...prevInteraction, hover: true } });
+        requestAnimationFrame(() => repositionPopup());
+      });
+
+      network.moveTo({
+        position, // {x,y}
+        scale, // number
+        animation: { duration, easingFunction: easing },
+      });
+    },
+    [network, repositionPopup],
+  );
+
   // interactions
   const followRafRef = useRef(0);
   useEffect(() => {
@@ -173,7 +211,6 @@ export default function Graph() {
     const onDblClick = (params) => {
       if (params.nodes?.length || params.edges?.length) return;
       const { DOM } = params.pointer;
-      // DOM is container-relative: perfect for DOMtoCanvas later
       setQuickAdd({ x: DOM.x, y: DOM.y });
     };
 
@@ -213,7 +250,7 @@ export default function Graph() {
     };
 
     const follow = () => {
-      if (!selected) return;
+      if (!selected || isAnimatingCameraRef.current) return;
       if (followRafRef.current) return;
       followRafRef.current = requestAnimationFrame(() => {
         followRafRef.current = 0;
@@ -347,39 +384,263 @@ export default function Graph() {
   }, [filters, applyActiveFilters, network]);
 
   // IO helpers
-  const toIntIfNumeric = (v) => {
-    const n = Number(v);
-    return Number.isInteger(n) ? n : v;
+  // ---------------- RDF EXPORT HELPERS ----------------
+  const BASE_IRI = 'http://example.org/'; // tweak or make this user-configurable
+
+  // best-effort predicate name if we don't have a full IRI on the edge
+  const slug = (s = '') =>
+    String(s)
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '') || 'relatedTo';
+
+  // map a node record -> RDF term
+  const nodeToTerm = (n) => {
+    if (!n) return null;
+    if (n.iri) return namedNode(n.iri);
+    if (n.bnode) return blankNode(n.bnode);
+    // mint a stable IRI for non-RDF nodes
+    return namedNode(`${BASE_IRI}node/${n.id}`);
   };
+
+  // if the "object" is a literal node from RDF import, turn it into an RDF literal
+  const literalFromNode = (n) => {
+    if (!n) return null;
+    const val = n.value ?? n.label ?? n.name ?? String(n.id);
+    if (n.lang) return literal(val, n.lang);
+    if (n.datatype) return literal(val, namedNode(n.datatype));
+    return literal(val);
+  };
+
+  // serialize current graphData -> TTL or N-Triples text
+  const serializeGraphToRDF = (format = 'ttl') => {
+    const prefixes = {
+      rdfs: 'http://www.w3.org/2000/01/rdf-schema#',
+      schema: 'http://schema.org/',
+      ex: BASE_IRI, // for minted IRIs
+      exprop: `${BASE_IRI}prop/`, // for non-IRI predicates from labels/props
+    };
+
+    const writer = new Writer({
+      prefixes,
+      format: format === 'nt' ? 'N-Triples' : undefined, // default = Turtle
+    });
+
+    const nodesById = new Map(graphData.nodes.map((n) => [String(n.id), n]));
+
+    // Node-level metadata (labels + props we stored)
+    for (const n of graphData.nodes) {
+      const s = nodeToTerm(n);
+      if (!s) continue;
+
+      // label
+      if (n.label && n.label !== n.iri) {
+        writer.addQuad(quad(s, namedNode(prefixes.rdfs + 'label'), literal(n.label)));
+      }
+
+      // well-known description keys
+      if (n.props && n.props.description) {
+        writer.addQuad(
+          quad(
+            s,
+            namedNode(prefixes.schema + 'description'),
+            literal(n.props.description),
+          ),
+        );
+      }
+
+      // any other props -> exprop:<slug>
+      if (n.props) {
+        for (const [k, v] of Object.entries(n.props)) {
+          if (k === 'description') continue;
+          const p = namedNode(prefixes.exprop + slug(k));
+          writer.addQuad(quad(s, p, literal(String(v))));
+        }
+      }
+    }
+
+    // Edges -> triples
+    for (const e of graphData.edges) {
+      const sNode = nodesById.get(String(e.from));
+      const oNode = nodesById.get(String(e.to));
+      const s = nodeToTerm(sNode);
+      if (!s) continue;
+
+      // predicate: prefer full IRI (from RDF import), else mint exprop:<slug(label)>
+      const p = e.iri ? namedNode(e.iri) : namedNode(prefixes.exprop + slug(e.label));
+
+      let o = nodeToTerm(oNode);
+      // if target is a literal node, emit a literal instead of a resource
+      if (oNode && (oNode.type === 'Literal' || 'value' in oNode)) {
+        o = literalFromNode(oNode);
+      }
+      if (!o) continue;
+
+      writer.addQuad(quad(s, p, o));
+    }
+
+    return new Promise((resolve, reject) => {
+      writer.end((err, result) => (err ? reject(err) : resolve(result)));
+    });
+  };
+
+  // download helpers
+  const downloadTextFile = (text, filename, mime = 'text/plain') => {
+    const blob = new Blob([text], { type: mime + ';charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // handlers wired to Toolbar
+  const onDownloadTTL = async () => {
+    try {
+      const ttl = await serializeGraphToRDF('ttl');
+      downloadTextFile(ttl, 'graph.ttl', 'text/turtle');
+      notify('Exported graph.ttl', 'success');
+    } catch (err) {
+      notify('TTL export failed', 'error');
+    }
+  };
+
+  const onDownloadNT = async () => {
+    try {
+      const nt = await serializeGraphToRDF('nt');
+      downloadTextFile(nt, 'graph.nt', 'application/n-triples');
+      notify('Exported graph.nt', 'success');
+    } catch (err) {
+      notify('N-Triples export failed', 'error');
+    }
+  };
+
+  // --- JSON: import handler (worker + batching, same as RDF) ---
   const onImportJSON = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ({ target }) => {
-      try {
-        const parsed = JSON.parse(target.result);
-        const rawNodes = parsed.nodes ?? [];
-        const rawEdges = parsed.edges ?? parsed.links ?? [];
-        const nodes = rawNodes.map((n, i) => {
-          const id = toIntIfNumeric(n.id ?? i + 1);
-          const name = n.name ?? n.label ?? `Node ${id}`;
-          return { ...n, id, name, label: n.label ?? name };
-        });
-        const edges = rawEdges.map((ed, i) => ({
-          id: ed.id ?? `e_${i}`,
-          from: toIntIfNumeric(ed.from ?? ed.source),
-          to: toIntIfNumeric(ed.to ?? ed.target),
-          label: ed.label ?? ed.rel ?? '',
-          ...ed,
-        }));
-        setGraphData({ nodes, edges });
-        notify('JSON imported', 'success');
-      } catch {
-        notify('Invalid JSON file', 'error');
+
+    // Pause layout + avoid React→vis resync while we stream
+    suspendLayoutRef.current = true;
+    skipVisSyncRef.current = true;
+
+    network?.setOptions({
+      physics: { enabled: false },
+      layout: { improvedLayout: false },
+      interaction: { hover: false, zoomSpeed: 0.8 },
+      edges: { smooth: false },
+      nodes: { shadow: false },
+    });
+
+    notify('Parsing JSON…', 'info', 3000);
+
+    const worker = new Worker(new URL('../../workers/jsonWorker.js', import.meta.url));
+    worker.onmessage = (msg) => {
+      const { type } = msg.data || {};
+      if (type === 'error') {
+        notify(`JSON parse failed: ${msg.data.message}`, 'error', 4000);
+        suspendLayoutRef.current = false;
+        skipVisSyncRef.current = false;
+        worker.terminate();
+        return;
+      }
+      if (type === 'done') {
+        const { nodes, edges } = msg.data;
+
+        if (!network) {
+          // Fallback: just set state
+          setGraphData({ nodes, edges });
+          notify(
+            `JSON imported (${nodes.length} nodes, ${edges.length} edges)`,
+            'success',
+          );
+          suspendLayoutRef.current = false;
+          skipVisSyncRef.current = false;
+          worker.terminate();
+          return;
+        }
+
+        // Clear & stream to vis in chunks (keeps UI responsive)
+        network.setData({ nodes: [], edges: [] });
+
+        const visNodesChunk = (chunk) =>
+          chunk.map((n) => ({
+            id: String(n.id),
+            label: n.label ?? n.name ?? String(n.id),
+            title: n.type ?? '',
+            hidden: !!n.hidden,
+            ...n,
+          }));
+
+        const visEdgesChunk = (chunk) =>
+          chunk.map((e) => ({
+            id: String(e.id ?? `${e.from}->${e.to}-${e.label ?? ''}`),
+            from: String(e.from),
+            to: String(e.to),
+            label: e.label ?? '',
+            arrows: 'to',
+            hidden: !!e.hidden,
+            ...e,
+          }));
+
+        const dsNodes = network.body.data.nodes;
+        const dsEdges = network.body.data.edges;
+
+        let ni = 0,
+          ei = 0;
+
+        const feedNodes = () => {
+          const slice = nodes.slice(ni, ni + BATCH_SIZE_NODES);
+          dsNodes.update(visNodesChunk(slice));
+          ni += slice.length;
+          if (ni < nodes.length) {
+            setTimeout(feedNodes, 0);
+          } else {
+            setTimeout(feedEdges, 0);
+          }
+        };
+
+        const feedEdges = () => {
+          const slice = edges.slice(ei, ei + BATCH_SIZE_EDGES);
+          dsEdges.update(visEdgesChunk(slice));
+          ei += slice.length;
+          if (ei < edges.length) {
+            setTimeout(feedEdges, 0);
+          } else {
+            requestAnimationFrame(() => {
+              network.fit({ animation: false });
+              network.setOptions({ interaction: { hover: true, zoomSpeed: 0.8 } });
+
+              // Update React state after vis is ready (SearchBar, etc.)
+              setGraphData({ nodes, edges });
+
+              notify(
+                `JSON imported (${nodes.length} nodes, ${edges.length} edges)`,
+                'success',
+              );
+
+              suspendLayoutRef.current = false;
+              // Keep skipVisSyncRef.current = true to avoid the big setData effect
+              // If you want to re-enable React→vis syncing later, set it false then.
+              // skipVisSyncRef.current = false;
+
+              worker.terminate();
+            });
+          }
+        };
+
+        setTimeout(feedNodes, 0);
       }
     };
+
+    const reader = new FileReader();
+    reader.onload = ({ target }) => worker.postMessage({ text: target.result });
     reader.readAsText(file);
+    e.target.value = '';
   };
+
   const downloadJSON = () => {
     const payload = { nodes: graphData.nodes, links: graphData.edges };
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
@@ -401,55 +662,142 @@ export default function Graph() {
       .catch(() => notify('Copy failed', 'error'));
   };
 
-  // --- RDF: import handler ---
+  // --- RDF: import handler (worker + batching) ---
   const onImportRDF = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Pause auto layout so it won't fight the initial render
-    suspendLayoutRef.current = true;
-
     const isTTL = file.name.toLowerCase().endsWith('.ttl');
     const contentType = isTTL ? 'text/turtle' : 'application/n-triples';
 
-    const reader = new FileReader();
-    reader.onload = ({ target }) => {
-      try {
-        const { nodes, edges } = parseRdfText(target.result, contentType);
+    // Prepare: pause layout, stop physics, and prevent the vis-sync effect
+    suspendLayoutRef.current = true;
+    skipVisSyncRef.current = true;
 
-        // Turn off physics & fancy layout before pushing a big dataset
-        if (network) {
-          network.setOptions({
-            physics: { enabled: false },
-            layout: { improvedLayout: false },
-            interaction: { hover: false },
-          });
-        }
+    network?.setOptions({
+      physics: { enabled: false },
+      layout: { improvedLayout: false },
+      interaction: { hover: false, zoomSpeed: 0.8 },
+      edges: { smooth: false },
+      nodes: { shadow: false },
+    });
 
-        // Single state update
-        setGraphData({ nodes, edges });
+    notify('Parsing RDF…', 'info', 4000);
 
-        // After vis ingests it (next frame), fit once without animation
-        requestAnimationFrame(() => {
-          network?.fit({ animation: false });
-          // Re-enable interactions; keep physics off by default for performance
-          network?.setOptions({ interaction: { hover: true } });
-          // Let layout resume for future actions
-          suspendLayoutRef.current = false;
+    // Spin up the worker
+    const worker = new Worker(new URL('../../workers/rdfWorker.js', import.meta.url));
+    worker.onmessage = async (msg) => {
+      const { type } = msg.data || {};
+      if (type === 'progress') {
+        // optional: progress ping
+        return;
+      }
+      if (type === 'error') {
+        notify(`RDF parse failed: ${msg.data.message}`, 'error', 4000);
+        suspendLayoutRef.current = false;
+        skipVisSyncRef.current = false;
+        worker.terminate();
+        return;
+      }
+      if (type === 'done') {
+        const { nodes, edges } = msg.data;
+        isBigImportRef.current = nodes.length + edges.length >= BIG_IMPORT_THRESHOLD;
+
+        if (!network) {
+          setGraphData({ nodes, edges });
           notify(
             `RDF imported (${nodes.length} nodes, ${edges.length} edges)`,
             'success',
           );
-        });
-      } catch (err) {
-        console.error(err);
-        notify('Invalid RDF (.nt/.ttl) file', 'error');
-        suspendLayoutRef.current = false;
+          suspendLayoutRef.current = false;
+          skipVisSyncRef.current = false;
+          worker.terminate();
+          return;
+        }
+
+        // 1) Clear vis and start fresh DataSets
+        network.setData({ nodes: [], edges: [] });
+
+        // 2) Batch insert nodes, then edges
+        const visNodesChunk = (chunk) =>
+          chunk.map((n) => ({
+            id: String(n.id),
+            label: n.label ?? n.name ?? String(n.id),
+            title: n.type ?? '',
+            hidden: !!n.hidden,
+            ...('iri' in n ? { iri: n.iri } : {}),
+            ...('props' in n ? { props: n.props } : {}),
+          }));
+
+        const visEdgesChunk = (chunk) =>
+          chunk.map((e) => ({
+            id: String(e.id ?? `${e.from}->${e.to}-${e.label ?? ''}`),
+            from: String(e.from),
+            to: String(e.to),
+            label: e.label ?? '',
+            arrows: 'to',
+            hidden: !!e.hidden,
+            ...e,
+          }));
+
+        const dsNodes = network.body.data.nodes;
+        const dsEdges = network.body.data.edges;
+
+        let ni = 0,
+          ei = 0;
+
+        const feedNodes = () => {
+          const slice = nodes.slice(ni, ni + BATCH_SIZE_NODES);
+          dsNodes.update(visNodesChunk(slice));
+          ni += slice.length;
+          if (ni < nodes.length) {
+            setTimeout(feedNodes, 0);
+          } else {
+            setTimeout(feedEdges, 0);
+          }
+        };
+
+        const feedEdges = () => {
+          const slice = edges.slice(ei, ei + BATCH_SIZE_EDGES);
+          dsEdges.update(visEdgesChunk(slice));
+          ei += slice.length;
+          if (ei < edges.length) {
+            setTimeout(feedEdges, 0);
+          } else {
+            requestAnimationFrame(() => {
+              network.fit({ animation: false });
+              network.setOptions({ interaction: { hover: true, zoomSpeed: 0.8 } });
+
+              // Push to React state after vis is ready
+              setGraphData({ nodes, edges });
+
+              notify(
+                `RDF imported (${nodes.length} nodes, ${edges.length} edges)`,
+                'success',
+              );
+
+              // keep physics off for big graphs; re-enable layout for future small ops
+              suspendLayoutRef.current = false;
+              // Keep skipVisSyncRef = true unless you need React→vis resync
+              // skipVisSyncRef.current = false;
+
+              worker.terminate();
+            });
+          }
+        };
+
+        // start batching
+        setTimeout(feedNodes, 0);
       }
+    };
+
+    const reader = new FileReader();
+    reader.onload = ({ target }) => {
+      worker.postMessage({ text: target.result, contentType });
     };
     reader.readAsText(file);
 
-    // allow re-selecting the same file
+    // allow picking the same file twice
     e.target.value = '';
   };
 
@@ -628,6 +976,8 @@ export default function Graph() {
         onDownloadJSON={downloadJSON}
         onCopyJSON={copyJSON}
         onImportRDF={onImportRDF}
+        onDownloadTTL={onDownloadTTL}
+        onDownloadNT={onDownloadNT}
       />
 
       <div
@@ -699,15 +1049,15 @@ export default function Graph() {
                 if (spawn) {
                   network.moveNode(idStr, spawn.x, spawn.y);
                 }
-                // Get the *actual* position vis is using now
                 const pos = network.getPositions([idStr])[idStr] || spawn;
                 if (!pos) return;
 
-                // Hard-center & zoom in
-                network.moveTo({
+                // Smooth center & zoom in
+                animateTo({
                   position: pos,
-                  scale: 2.0, // adjust zoom level to taste
-                  animation: { duration: 600, easingFunction: 'easeInOutQuad' },
+                  scale: 2.0, // tweak to taste
+                  duration: 600,
+                  easing: 'easeInOutCubic',
                 });
 
                 // Select & open panel

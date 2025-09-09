@@ -33,6 +33,8 @@ export default function Toolbar({
   onDownloadJSON,
   onCopyJSON,
   onImportRDF,
+  onDownloadNT,
+  onDownloadTTL,
 }) {
   const [fileOpen, setFileOpen] = React.useState(false);
   const [addOpen, setAddOpen] = React.useState(false);
@@ -200,10 +202,10 @@ export default function Toolbar({
                   cursor: 'pointer',
                 }}
               >
-                Import RDF (.nt)
+                Import RDF (.nt/.ttl)
                 <input
                   type="file"
-                  accept=".nt"
+                  accept=".nt,.ttl"
                   onChange={(e) => {
                     onImportRDF(e);
                     setFileOpen(false);
@@ -213,6 +215,25 @@ export default function Toolbar({
                 />
               </label>
             )}
+            <button
+              style={menuItem}
+              onClick={() => {
+                setFileOpen(false);
+                onDownloadTTL && onDownloadTTL();
+              }}
+            >
+              Download RDF (TTL)
+            </button>
+
+            <button
+              style={menuItem}
+              onClick={() => {
+                setFileOpen(false);
+                onDownloadNT && onDownloadNT();
+              }}
+            >
+              Download RDF (N-Triples)
+            </button>
           </div>
         )}
       </div>
