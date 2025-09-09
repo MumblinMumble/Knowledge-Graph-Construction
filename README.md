@@ -1,7 +1,5 @@
 ## To Run
 
-## Frontend
-
 In the knowledge-graph-view directory, you can run:
 
 ### `npm start`
@@ -26,15 +24,3 @@ The build is minified and the filenames include the hashes.\
 Your app is ready to be deployed!
 
 See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
-
-## Backend
-
-In the main directory: 
-
-### `pip install -r requirements.txt`
-
-### `uvicorn main:app --reload`
-
-## Database
-
-This needs Neo4j installed
