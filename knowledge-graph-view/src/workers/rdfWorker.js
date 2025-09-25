@@ -1,144 +1,171 @@
 /* eslint-disable no-restricted-globals */
+// src/workers/rdfWorker.js
 import { Parser } from 'n3';
 
-// Predicates treated as annotations (no literal nodes/edges created)
-const LABEL_PREDS = new Set([
-  'http://www.w3.org/2000/01/rdf-schema#label',
-  'http://schema.org/name',
-  'http://xmlns.com/foaf/0.1/name',
-  'http://www.w3.org/2004/02/skos/core#prefLabel',
-]);
+// label predicates
+const RDFS_LABEL = 'http://www.w3.org/2000/01/rdf-schema#label';
+const SKOS_PREF = 'http://www.w3.org/2004/02/skos/core#prefLabel';
+const SCHEMA_NAME = 'http://schema.org/name';
 
-const DESC_PREDS = new Set([
-  'http://schema.org/description',
-  'http://purl.org/dc/terms/description',
-]);
+const iri2id = new Map(); // IRI/blank-id -> numeric id
+const lit2id = new Map(); // literal signature -> id
+const nodeMap = new Map(); // id -> node
+const edgeMap = new Map(); // key -> edge
+const bestLbl = new Map(); // iri -> { value, lang }
+let nextId = 1;
 
-// Keep in sync with your exporter (Graph.jsx BASE_IRI/exprop)
-const EXPROP_PREFIX = 'http://example.org/prop/';
-
-const localName = (iri) =>
-  iri.slice(Math.max(iri.lastIndexOf('#'), iri.lastIndexOf('/')) + 1);
-
-// Stable numeric id per RDF term key
-const idFor = (() => {
-  let next = 1;
-  const map = new Map(); // termKey -> numeric id
-  return (key) => {
-    if (!map.has(key)) map.set(key, next++);
-    return map.get(key);
-  };
-})();
-
-self.onmessage = (e) => {
-  const { text, contentType } = e.data || {};
+const safeDecode = (s) => {
   try {
-    const parser = new Parser({
-      format: contentType === 'text/turtle' ? 'text/turtle' : 'application/n-triples',
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+};
+const iriLocal = (iri = '') => {
+  const d = safeDecode(iri);
+  const i = Math.max(d.lastIndexOf('#'), d.lastIndexOf('/'), d.lastIndexOf(':'));
+  const t = d.slice(i + 1);
+  return t.length > 64 ? t.slice(0, 61) + '…' : t;
+};
+const looksUrlLiteral = (v = '') => /^(https?:\/\/|www\.)/i.test(v);
+
+function upsertIriNode(iri) {
+  let id = iri2id.get(iri);
+  if (!id) {
+    id = nextId++;
+    iri2id.set(iri, id);
+    const lbl = iriLocal(iri);
+    nodeMap.set(id, { id, iri, label: lbl, name: lbl });
+  }
+  return id;
+}
+function litKey(v, lang, dt) {
+  return `${v}||${lang || ''}||${dt || ''}`;
+}
+function upsertLiteralNode(value, lang, datatype) {
+  const dt = typeof datatype === 'string' ? datatype : datatype?.value || '';
+  const key = litKey(value, lang, dt);
+  let id = lit2id.get(key);
+  if (!id) {
+    id = nextId++;
+    lit2id.set(key, id);
+    nodeMap.set(id, {
+      id,
+      type: 'Literal',
+      value,
+      lang: lang || undefined,
+      datatype: dt || undefined,
+      label: value.length > 64 ? value.slice(0, 61) + '…' : value,
+      name: value,
     });
+  }
+  return id;
+}
+function upsertEdge(sId, pIri, oId) {
+  if (!sId || !oId) return;
+  const key = `${sId}|${pIri}|${oId}`;
+  if (edgeMap.has(key)) return;
+  edgeMap.set(key, {
+    id: `e_${edgeMap.size + 1}`,
+    from: sId,
+    to: oId,
+    iri: pIri,
+    label: iriLocal(pIri),
+  });
+}
+function applyBestLabels() {
+  for (const [iri, info] of bestLbl.entries()) {
+    const id = iri2id.get(iri);
+    if (!id) continue;
+    const n = nodeMap.get(id);
+    if (!n) continue;
+    const v = info.value;
+    n.label = v.length > 64 ? v.slice(0, 61) + '…' : v;
+    n.name = v;
+  }
+}
 
-    const quads = parser.parse(text);
+function parseRDF(text, contentType) {
+  // IMPORTANT: use N3's format tokens, not MIME types
+  const isNT = /n-?triples/i.test(contentType || '');
+  const parser = new Parser({ format: isNT ? 'N-Triples' : 'Turtle' });
 
-    const nodesMap = new Map(); // idStr -> node
-    const edges = [];
+  // Use array mode (more robust than callback mode)
+  const quads = parser.parse(text);
 
-    // Create or return an existing node object for any RDF term
-    const ensureNode = (term) => {
-      const key =
-        term.termType === 'NamedNode'
-          ? `iri:${term.value}`
-          : term.termType === 'BlankNode'
-          ? `bnode:${term.value}`
-          : term.termType === 'Literal'
-          ? `lit:${term.value}|${term.language || ''}|${term.datatype?.value || ''}`
-          : `unk:${term.value || term.id || Math.random()}`;
-
-      const id = idFor(key);
-      const idStr = String(id);
-
-      if (!nodesMap.has(idStr)) {
-        const base = { id, hidden: false };
-        if (term.termType === 'NamedNode') {
-          nodesMap.set(idStr, { ...base, iri: term.value, label: term.value });
-        } else if (term.termType === 'BlankNode') {
-          nodesMap.set(idStr, { ...base, bnode: term.value, label: `_:${term.value}` });
-        } else if (term.termType === 'Literal') {
-          nodesMap.set(idStr, {
-            ...base,
-            type: 'Literal',
-            value: term.value,
-            lang: term.language || undefined,
-            datatype: term.datatype?.value || undefined,
-            label: term.value,
-          });
-        } else {
-          nodesMap.set(idStr, { ...base, label: idStr });
+  // 1st pass: collect labels & ensure subj nodes exist
+  for (const q of quads) {
+    const { subject: s, predicate: p, object: o } = q;
+    if (
+      o.termType === 'Literal' &&
+      (p.value === RDFS_LABEL || p.value === SKOS_PREF || p.value === SCHEMA_NAME)
+    ) {
+      if (s.termType === 'NamedNode' || s.termType === 'BlankNode') {
+        upsertIriNode(s.value);
+        const lang = (o.language || '').toLowerCase();
+        const prev = bestLbl.get(s.value);
+        if (!prev || (lang === 'en' && prev.lang !== 'en')) {
+          bestLbl.set(s.value, { value: o.value, lang });
         }
       }
-      return nodesMap.get(idStr);
-    };
-
-    // ---------- PASS 1: collect labels/descriptions/props on the subject ----------
-    for (const q of quads) {
-      const s = ensureNode(q.subject);
-      const pIri = q.predicate.value;
-
-      // rdfs:label → subject.label (no literal node, no edge)
-      if (LABEL_PREDS.has(pIri) && q.object.termType === 'Literal') {
-        s.label = q.object.value;
-        if (q.object.language) s.lang = q.object.language;
-        continue;
-      }
-
-      // description → subject.props.description (no literal node, no edge)
-      if (DESC_PREDS.has(pIri) && q.object.termType === 'Literal') {
-        s.props = s.props || {};
-        s.props.description = q.object.value;
-        continue;
-      }
-
-      // OPTIONAL: collapse exprop:* literal triples back into props
-      if (pIri.startsWith(EXPROP_PREFIX) && q.object.termType === 'Literal') {
-        const key = localName(pIri).replace(/_/g, ' ');
-        s.props = s.props || {};
-        s.props[key] = q.object.value;
-        continue;
-      }
-
-      // For other predicates we don't need to touch object here; edges handled in Pass 2
     }
+  }
 
-    // ---------- PASS 2: create edges (resources + non-collapsed literals) ----------
-    let ei = 0;
-    for (const q of quads) {
-      const pIri = q.predicate.value;
+  // 2nd pass: make nodes/edges
+  for (const q of quads) {
+    const { subject: s, predicate: p, object: o } = q;
 
-      // Skip edges we collapsed in Pass 1
-      if (
-        (LABEL_PREDS.has(pIri) || DESC_PREDS.has(pIri)) &&
-        q.object.termType === 'Literal'
-      ) {
-        continue;
-      }
-      if (pIri.startsWith(EXPROP_PREFIX) && q.object.termType === 'Literal') {
-        continue;
-      }
+    // skip label triples as edges
+    if (
+      o.termType === 'Literal' &&
+      (p.value === RDFS_LABEL || p.value === SKOS_PREF || p.value === SCHEMA_NAME)
+    )
+      continue;
 
-      const s = ensureNode(q.subject);
-      const o = ensureNode(q.object);
+    // subject
+    let sId = null;
+    if (s.termType === 'NamedNode' || s.termType === 'BlankNode')
+      sId = upsertIriNode(s.value);
+    else continue; // rare literal subject -> skip
 
-      edges.push({
-        id: `e_${++ei}`,
-        from: s.id,
-        to: o.id,
-        iri: pIri,
-        label: pIri, // you can shorten to CURIE in the UI if desired
-      });
+    // object
+    let oId = null;
+    if (o.termType === 'NamedNode' || o.termType === 'BlankNode') {
+      oId = upsertIriNode(o.value);
+    } else if (o.termType === 'Literal') {
+      if (looksUrlLiteral(o.value)) continue; // drop URL-like literals
+      oId = upsertLiteralNode(o.value, o.language, o.datatype);
+    } else continue;
+
+    upsertEdge(sId, p.value, oId);
+  }
+
+  applyBestLabels();
+
+  return {
+    nodes: Array.from(nodeMap.values()),
+    edges: Array.from(edgeMap.values()),
+  };
+}
+
+self.onmessage = (ev) => {
+  try {
+    const { text, contentType } = ev.data || {};
+    if (!text) {
+      self.postMessage({ type: 'error', message: 'No text provided' });
+      return;
     }
+    // reset state
+    iri2id.clear();
+    lit2id.clear();
+    nodeMap.clear();
+    edgeMap.clear();
+    bestLbl.clear();
+    nextId = 1;
 
-    const nodes = Array.from(nodesMap.values());
+    const { nodes, edges } = parseRDF(text, contentType || '');
     self.postMessage({ type: 'done', nodes, edges });
-  } catch (err) {
-    self.postMessage({ type: 'error', message: err?.message || String(err) });
+  } catch (e) {
+    self.postMessage({ type: 'error', message: e?.message || String(e) });
   }
 };
