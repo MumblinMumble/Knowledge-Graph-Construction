@@ -1,6 +1,6 @@
 // src/components/Graph/Graph.jsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { DataFactory, Writer } from 'n3';
+import { DataFactory } from 'n3';
 import useVisNetwork from '../../hooks/useVisNetwork';
 import useLayout from '../../hooks/useLayout';
 import Toolbar from './Toolbar';
@@ -15,21 +15,19 @@ import {
   Toast,
 } from './Popovers';
 
+import { applyVisTheme } from './utils/theme';
+import { toVisNode, toVisEdge, iriTail } from './utils/mappers';
+import { stripHidden } from './utils/stripHidden';
+import { makeJsonImportHandler } from './io/jsonImport';
+import { makeRdfImportHandler } from './io/rdfImport';
+import { serializeGraphToRDF } from './io/rdfExport';
+
 export default function Graph() {
   // vis setup
   const { networkRef, network } = useVisNetwork();
 
   // canonical data
   const [graphData, setGraphData] = useState({ nodes: [], edges: [] });
-
-  // helper: remove any persisted hidden flags (fixes “missing nodes”)
-  const stripHidden = useCallback(
-    ({ nodes, edges }) => ({
-      nodes: (nodes ?? []).map((n) => ({ ...n, hidden: false })),
-      edges: (edges ?? []).map((e) => ({ ...e, hidden: false })),
-    }),
-    [],
-  );
 
   // layout
   const [layoutMode, setLayoutMode] = useState('force');
@@ -40,7 +38,7 @@ export default function Graph() {
   useEffect(() => {
     if (suspendLayoutRef.current) return;
     applyLayout(layoutMode);
-  }, [layoutMode, applyLayout, graphData.nodes.length, graphData.edges.length]); // include edges
+  }, [layoutMode, applyLayout, graphData.nodes.length, graphData.edges.length]);
 
   // selection + panel positioning
   const [selected, setSelected] = useState(null); // { type:'Node'|'Edge', data }
@@ -50,7 +48,6 @@ export default function Graph() {
 
   // import batching
   const skipVisSyncRef = useRef(false); // skip React→vis setData during big imports
-  const isBigImportRef = useRef(false);
   const BIG_IMPORT_THRESHOLD = 6000;
   const BATCH_SIZE_NODES = 3000;
   const BATCH_SIZE_EDGES = 4000;
@@ -89,98 +86,13 @@ export default function Graph() {
     notifyTimer.current = window.setTimeout(() => setToast(null), ms);
   }, []);
 
-  // ---------- visual theme (dark, legible labels) ----------
+  // ---------- theme ----------
   useEffect(() => {
     if (!network) return;
-    network.setOptions({
-      nodes: {
-        shape: 'dot',
-        size: 18,
-        borderWidth: 2,
-        font: {
-          color: '#0f172a', // dark
-          size: 14,
-          face: 'Inter, ui-sans-serif',
-          strokeWidth: 2,
-          strokeColor: '#ffffff',
-        },
-        color: {
-          background: '#0ea5e9',
-          border: '#0284c7',
-          highlight: { background: '#22c55e', border: '#16a34a' },
-          hover: { background: '#38bdf8', border: '#0284c7' },
-        },
-      },
-      edges: {
-        width: 1.5,
-        selectionWidth: 2,
-        smooth: false,
-        color: {
-          color: '#64748b',
-          highlight: '#22c55e',
-          hover: '#38bdf8',
-          inherit: false,
-        },
-        font: {
-          color: '#334155',
-          size: 12,
-          face: 'Inter, ui-sans-serif',
-          strokeWidth: 2,
-          strokeColor: '#ffffff',
-          background: 'rgba(255,255,255,0.65)',
-        },
-        arrows: { to: { enabled: true, scaleFactor: 0.8 } },
-      },
-      interaction: { hover: true, tooltipDelay: 100 },
-      physics: { enabled: true },
-    });
+    applyVisTheme(network);
   }, [network]);
 
-  // ---------- mapping helpers ----------
-  const iriTail = (iri = '') => {
-    try {
-      const t = iri.split(/[\/#]/).pop() || iri;
-      return decodeURIComponent(t);
-    } catch {
-      return iri;
-    }
-  };
-
-  const toVisNode = (n) => ({
-    ...n,
-    id: String(n.id),
-    label:
-      n.label ??
-      n.name ??
-      n.value ?? // literal nodes
-      (n.iri ? iriTail(n.iri) : String(n.id)),
-    title: n.iri || n.type || '',
-    hidden: !!n.hidden,
-    // optional: distinct style for literal nodes
-    ...(n.type === 'Literal'
-      ? {
-          shape: 'box',
-          font: { face: 'Inter, ui-sans-serif', size: 12 },
-          color: {
-            background: '#fde68a',
-            border: '#f59e0b',
-            highlight: { background: '#fcd34d', border: '#d97706' },
-          },
-        }
-      : {}),
-  });
-
-  const toVisEdge = (e) => ({
-    ...e,
-    id: String(e.id ?? `${e.from}->${e.to}-${e.label ?? (e.iri ? iriTail(e.iri) : '')}`),
-    from: String(e.from),
-    to: String(e.to),
-    label: e.label ?? (e.iri ? iriTail(e.iri) : ''),
-    arrows: 'to',
-    hidden: !!e.hidden,
-  });
-
-  // vis data mapping (React → vis)
+  // ---------- mapping ----------
   const visNodes = useMemo(() => graphData.nodes.map(toVisNode), [graphData.nodes]);
   const visEdges = useMemo(() => graphData.edges.map(toVisEdge), [graphData.edges]);
 
@@ -409,75 +321,72 @@ export default function Graph() {
   }, [edgeFrom, quickAdd, quickEdge, notify, network]);
 
   // filters → hidden flags
-  const applyActiveFilters = useCallback(
-    (filtersList) => {
-      if (!filtersList.length) return;
-      setGraphData((prev) => {
-        const allNodeIds = prev.nodes.map((n) => n.id);
-        const allEdgeIds = prev.edges.map((e) => String(e.id));
-        let keepNodes = new Set(allNodeIds),
-          keepEdges = new Set(allEdgeIds);
-        const intersect = (a, b) => new Set([...a].filter((x) => b.has(x)));
+  const applyActiveFilters = useCallback((filtersList) => {
+    if (!filtersList.length) return;
+    setGraphData((prev) => {
+      const allNodeIds = prev.nodes.map((n) => n.id);
+      const allEdgeIds = prev.edges.map((e) => String(e.id));
+      let keepNodes = new Set(allNodeIds),
+        keepEdges = new Set(allEdgeIds);
+      const intersect = (a, b) => new Set([...a].filter((x) => b.has(x)));
 
-        filtersList.forEach((f) => {
-          if (f.kind === 'filterNodePropEq') {
-            const { key, value } = f.payload;
-            const vl = String(value).toLowerCase();
-            const matchNodes = new Set(
-              prev.nodes
-                .filter((n) => String(n[key] ?? '').toLowerCase() === vl)
-                .map((n) => n.id),
-            );
-            const incidentEdges = new Set(
-              prev.edges
-                .filter((e) => matchNodes.has(e.from) || matchNodes.has(e.to))
-                .map((e) => String(e.id)),
-            );
-            const neighborhood = new Set([...matchNodes]);
-            prev.edges.forEach((e) => {
-              if (incidentEdges.has(String(e.id))) {
-                neighborhood.add(e.from);
-                neighborhood.add(e.to);
-              }
-            });
-            keepNodes = intersect(keepNodes, neighborhood);
-            keepEdges = intersect(keepEdges, incidentEdges);
-          } else if (f.kind === 'filterEdgePropEq') {
-            const { key, value } = f.payload;
-            const vl = String(value).toLowerCase();
-            const matchEdges = new Set(
-              prev.edges
-                .filter((e) => String(e[key] ?? '').toLowerCase() === vl)
-                .map((e) => String(e.id)),
-            );
-            const endNodes = new Set();
-            prev.edges.forEach((e) => {
-              if (matchEdges.has(String(e.id))) {
-                endNodes.add(e.from);
-                endNodes.add(e.to);
-              }
-            });
-            keepEdges = intersect(keepEdges, matchEdges);
-            keepNodes = intersect(keepNodes, endNodes);
-          }
-        });
-
-        if (!filtersList.length) return stripHidden(prev);
-
-        return {
-          nodes: prev.nodes.map((n) => ({ ...n, hidden: !keepNodes.has(n.id) })),
-          edges: prev.edges.map((e) => ({
-            ...e,
-            hidden:
-              !keepEdges.has(String(e.id)) ||
-              !keepNodes.has(e.from) ||
-              !keepNodes.has(e.to),
-          })),
-        };
+      filtersList.forEach((f) => {
+        if (f.kind === 'filterNodePropEq') {
+          const { key, value } = f.payload;
+          const vl = String(value).toLowerCase();
+          const matchNodes = new Set(
+            prev.nodes
+              .filter((n) => String(n[key] ?? '').toLowerCase() === vl)
+              .map((n) => n.id),
+          );
+          const incidentEdges = new Set(
+            prev.edges
+              .filter((e) => matchNodes.has(e.from) || matchNodes.has(e.to))
+              .map((e) => String(e.id)),
+          );
+          const neighborhood = new Set([...matchNodes]);
+          prev.edges.forEach((e) => {
+            if (incidentEdges.has(String(e.id))) {
+              neighborhood.add(e.from);
+              neighborhood.add(e.to);
+            }
+          });
+          keepNodes = intersect(keepNodes, neighborhood);
+          keepEdges = intersect(keepEdges, incidentEdges);
+        } else if (f.kind === 'filterEdgePropEq') {
+          const { key, value } = f.payload;
+          const vl = String(value).toLowerCase();
+          const matchEdges = new Set(
+            prev.edges
+              .filter((e) => String(e[key] ?? '').toLowerCase() === vl)
+              .map((e) => String(e.id)),
+          );
+          const endNodes = new Set();
+          prev.edges.forEach((e) => {
+            if (matchEdges.has(String(e.id))) {
+              endNodes.add(e.from);
+              endNodes.add(e.to);
+            }
+          });
+          keepEdges = intersect(keepEdges, matchEdges);
+          keepNodes = intersect(keepNodes, endNodes);
+        }
       });
-    },
-    [stripHidden],
-  );
+
+      if (!filtersList.length) return stripHidden(prev);
+
+      return {
+        nodes: prev.nodes.map((n) => ({ ...n, hidden: !keepNodes.has(n.id) })),
+        edges: prev.edges.map((e) => ({
+          ...e,
+          hidden:
+            !keepEdges.has(String(e.id)) ||
+            !keepNodes.has(e.from) ||
+            !keepNodes.has(e.to),
+        })),
+      };
+    });
+  }, []);
 
   useEffect(() => {
     if (!filters.length) {
@@ -488,11 +397,10 @@ export default function Graph() {
     }
     applyActiveFilters(filters);
     setTimeout(() => network?.fit({ animation: { duration: 300 } }), 0);
-  }, [filters, applyActiveFilters, stripHidden, network]);
+  }, [filters, applyActiveFilters, network]);
 
   // ---------------- RDF EXPORT HELPERS ----------------
   const BASE_IRI = 'http://example.org/';
-
   const slug = (s = '') =>
     String(s)
       .trim()
@@ -515,82 +423,20 @@ export default function Graph() {
     return literal(val);
   };
 
-  const serializeGraphToRDF = (format = 'ttl') => {
-    const prefixes = {
-      rdfs: 'http://www.w3.org/2000/01/rdf-schema#',
-      schema: 'http://schema.org/',
-      ex: BASE_IRI,
-      exprop: `${BASE_IRI}prop/`,
-    };
-
-    const writer = new Writer({
-      prefixes,
-      format: format === 'nt' ? 'N-Triples' : undefined,
-    });
-
-    const nodesById = new Map(graphData.nodes.map((n) => [String(n.id), n]));
-
-    for (const n of graphData.nodes) {
-      const s = nodeToTerm(n);
-      if (!s) continue;
-
-      if (n.label && n.label !== n.iri) {
-        writer.addQuad(quad(s, namedNode(prefixes.rdfs + 'label'), literal(n.label)));
-      }
-
-      if (n.props && n.props.description) {
-        writer.addQuad(
-          quad(
-            s,
-            namedNode(prefixes.schema + 'description'),
-            literal(n.props.description),
-          ),
-        );
-      }
-
-      if (n.props) {
-        for (const [k, v] of Object.entries(n.props)) {
-          if (k === 'description') continue;
-          const p = namedNode(prefixes.exprop + slug(k));
-          writer.addQuad(quad(s, p, literal(String(v))));
-        }
-      }
-    }
-
-    for (const e of graphData.edges) {
-      const sNode = nodesById.get(String(e.from));
-      const oNode = nodesById.get(String(e.to));
-      const s = nodeToTerm(sNode);
-      if (!s) continue;
-      const p = e.iri ? namedNode(e.iri) : namedNode(prefixes.exprop + slug(e.label));
-      let o = nodeToTerm(oNode);
-      if (oNode && (oNode.type === 'Literal' || 'value' in oNode)) {
-        o = literalFromNode(oNode);
-      }
-      if (!o) continue;
-      writer.addQuad(quad(s, p, o));
-    }
-
-    return new Promise((resolve, reject) => {
-      writer.end((err, result) => (err ? reject(err) : resolve(result)));
-    });
-  };
-
-  // download helpers
-  const downloadTextFile = (text, filename, mime = 'text/plain') => {
-    const blob = new Blob([text], { type: `${mime};charset=utf-8` });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
   const onDownloadTTL = async () => {
     try {
-      const ttl = await serializeGraphToRDF('ttl');
-      downloadTextFile(ttl, 'graph.ttl', 'text/turtle');
+      const ttl = await serializeGraphToRDF(graphData, {
+        slug,
+        nodeToTerm,
+        literalFromNode,
+      });
+      const blob = new Blob([ttl], { type: 'text/turtle;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'graph.ttl';
+      a.click();
+      URL.revokeObjectURL(url);
       notify('Exported graph.ttl', 'success');
     } catch {
       notify('TTL export failed', 'error');
@@ -599,8 +445,18 @@ export default function Graph() {
 
   const onDownloadNT = async () => {
     try {
-      const nt = await serializeGraphToRDF('nt');
-      downloadTextFile(nt, 'graph.nt', 'application/n-triples');
+      const nt = await serializeGraphToRDF(
+        graphData,
+        { slug, nodeToTerm, literalFromNode },
+        'nt',
+      );
+      const blob = new Blob([nt], { type: 'application/n-triples;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'graph.nt';
+      a.click();
+      URL.revokeObjectURL(url);
       notify('Exported graph.nt', 'success');
     } catch {
       notify('N-Triples export failed', 'error');
@@ -608,221 +464,31 @@ export default function Graph() {
   };
 
   // --- JSON import (worker + batching) ---
-  const onImportJSON = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    suspendLayoutRef.current = true;
-    skipVisSyncRef.current = true;
-
-    network?.setOptions({
-      physics: { enabled: false },
-      layout: { improvedLayout: false },
-      interaction: { hover: false, zoomSpeed: 0.8 },
-      edges: { smooth: false },
-      nodes: { shadow: false },
-    });
-
-    notify('Parsing JSON…', 'info', 3000);
-
-    const worker = new Worker(new URL('../../workers/jsonWorker.js', import.meta.url));
-    worker.onmessage = (msg) => {
-      const { type } = msg.data || {};
-      if (type === 'error') {
-        notify(`JSON parse failed: ${msg.data.message}`, 'error', 4000);
-        suspendLayoutRef.current = false;
-        skipVisSyncRef.current = false;
-        network?.setOptions({ physics: { enabled: true }, interaction: { hover: true } });
-        worker.terminate();
-        return;
-      }
-      if (type === 'done') {
-        const { nodes, edges } = stripHidden(msg.data); // strip hidden flags
-        setFilters([]); // clear any active filters
-
-        if (!network) {
-          setGraphData({ nodes, edges });
-          notify(
-            `JSON imported (${nodes.length} nodes, ${edges.length} edges)`,
-            'success',
-          );
-          suspendLayoutRef.current = false;
-          skipVisSyncRef.current = false;
-          worker.terminate();
-          return;
-        }
-
-        network.setData({ nodes: [], edges: [] });
-
-        const dsNodes = network.body.data.nodes;
-        const dsEdges = network.body.data.edges;
-
-        let ni = 0,
-          ei = 0;
-
-        const feedNodes = () => {
-          const slice = nodes.slice(ni, ni + BATCH_SIZE_NODES).map(toVisNode);
-          dsNodes.update(slice);
-          ni += slice.length;
-          if (ni < nodes.length) setTimeout(feedNodes, 0);
-          else setTimeout(feedEdges, 0);
-        };
-
-        const feedEdges = () => {
-          const slice = edges.slice(ei, ei + BATCH_SIZE_EDGES).map(toVisEdge);
-          dsEdges.update(slice);
-          ei += slice.length;
-          if (ei < edges.length) setTimeout(feedEdges, 0);
-          else {
-            requestAnimationFrame(() => {
-              network.fit({ animation: false });
-              network.setOptions({
-                physics: { enabled: true },
-                interaction: { hover: true, zoomSpeed: 0.8 },
-              });
-              setGraphData({ nodes, edges });
-              notify(
-                `JSON imported (${nodes.length} nodes, ${edges.length} edges)`,
-                'success',
-              );
-              suspendLayoutRef.current = false;
-              skipVisSyncRef.current = false;
-              worker.terminate();
-            });
-          }
-        };
-
-        setTimeout(feedNodes, 0);
-      }
-    };
-
-    const reader = new FileReader();
-    reader.onload = ({ target }) => worker.postMessage({ text: target.result });
-    reader.readAsText(file);
-    e.target.value = '';
-  };
-
-  const downloadJSON = () => {
-    const payload = { nodes: graphData.nodes, links: graphData.edges };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], {
-      type: 'application/json',
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'graph.json';
-    a.click();
-    URL.revokeObjectURL(url);
-    notify('Downloaded graph.json', 'success');
-  };
-  const copyJSON = () => {
-    const payload = { nodes: graphData.nodes, links: graphData.edges };
-    navigator.clipboard
-      .writeText(JSON.stringify(payload, null, 2))
-      .then(() => notify('Copied JSON to clipboard', 'success'))
-      .catch(() => notify('Copy failed', 'error'));
-  };
+  const onImportJSON = makeJsonImportHandler({
+    network,
+    notify,
+    setGraphData,
+    setFilters,
+    stripHidden,
+    BATCH_SIZE_NODES,
+    BATCH_SIZE_EDGES,
+    suspendLayoutRef,
+    skipVisSyncRef,
+  });
 
   // --- RDF import (worker + batching) ---
-  const onImportRDF = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const isTTL = file.name.toLowerCase().endsWith('.ttl');
-    const contentType = isTTL ? 'text/turtle' : 'application/n-triples';
-
-    suspendLayoutRef.current = true;
-    skipVisSyncRef.current = true;
-
-    network?.setOptions({
-      physics: { enabled: false },
-      layout: { improvedLayout: false },
-      interaction: { hover: false, zoomSpeed: 0.8 },
-      edges: { smooth: false },
-      nodes: { shadow: false },
-    });
-
-    notify('Parsing RDF…', 'info', 4000);
-
-    const worker = new Worker(new URL('../../workers/rdfWorker.js', import.meta.url));
-    worker.onmessage = async (msg) => {
-      const { type } = msg.data || {};
-      if (type === 'progress') return;
-      if (type === 'error') {
-        notify(`RDF parse failed: ${msg.data.message}`, 'error', 4000);
-        suspendLayoutRef.current = false;
-        skipVisSyncRef.current = false;
-        network?.setOptions({ physics: { enabled: true }, interaction: { hover: true } });
-        worker.terminate();
-        return;
-      }
-      if (type === 'done') {
-        const { nodes, edges } = stripHidden(msg.data); // strip hidden flags
-        setFilters([]); // clear active filters
-        isBigImportRef.current = nodes.length + edges.length >= BIG_IMPORT_THRESHOLD;
-
-        if (!network) {
-          setGraphData({ nodes, edges });
-          notify(
-            `RDF imported (${nodes.length} nodes, ${edges.length} edges)`,
-            'success',
-          );
-          suspendLayoutRef.current = false;
-          skipVisSyncRef.current = false;
-          worker.terminate();
-          return;
-        }
-
-        network.setData({ nodes: [], edges: [] });
-
-        const dsNodes = network.body.data.nodes;
-        const dsEdges = network.body.data.edges;
-
-        let ni = 0,
-          ei = 0;
-
-        const feedNodes = () => {
-          const slice = nodes.slice(ni, ni + BATCH_SIZE_NODES).map(toVisNode);
-          dsNodes.update(slice);
-          ni += slice.length;
-          if (ni < nodes.length) setTimeout(feedNodes, 0);
-          else setTimeout(feedEdges, 0);
-        };
-
-        const feedEdges = () => {
-          const slice = edges.slice(ei, ei + BATCH_SIZE_EDGES).map(toVisEdge);
-          dsEdges.update(slice);
-          ei += slice.length;
-          if (ei < edges.length) setTimeout(feedEdges, 0);
-          else {
-            requestAnimationFrame(() => {
-              network.fit({ animation: false });
-              network.setOptions({
-                physics: { enabled: true },
-                interaction: { hover: true, zoomSpeed: 0.8 },
-              });
-              setGraphData({ nodes, edges });
-              notify(
-                `RDF imported (${nodes.length} nodes, ${edges.length} edges)`,
-                'success',
-              );
-              suspendLayoutRef.current = false;
-              skipVisSyncRef.current = false; // re-enable normal syncing
-              worker.terminate();
-            });
-          }
-        };
-
-        setTimeout(feedNodes, 0);
-      }
-    };
-
-    const reader = new FileReader();
-    reader.onload = ({ target }) =>
-      worker.postMessage({ text: target.result, contentType });
-    reader.readAsText(file);
-    e.target.value = '';
-  };
+  const onImportRDF = makeRdfImportHandler({
+    network,
+    notify,
+    setGraphData,
+    setFilters,
+    stripHidden,
+    BATCH_SIZE_NODES,
+    BATCH_SIZE_EDGES,
+    BIG_IMPORT_THRESHOLD,
+    suspendLayoutRef,
+    skipVisSyncRef,
+  });
 
   // selection helpers
   const selectNodesAndEdges = (nodeIds, edgeIds = []) => {
@@ -960,7 +626,7 @@ export default function Graph() {
     setSelected(null);
   };
 
-  // run example from help modal
+  // run example from help modal (placeholder; wire SPARQL later if you want)
   const runString = (_cmd) => {};
 
   // fit
@@ -994,8 +660,26 @@ export default function Graph() {
         layoutMode={layoutMode}
         setLayoutMode={setLayoutMode}
         onImportJSON={onImportJSON}
-        onDownloadJSON={downloadJSON}
-        onCopyJSON={copyJSON}
+        onDownloadJSON={() => {
+          const payload = { nodes: graphData.nodes, links: graphData.edges };
+          const blob = new Blob([JSON.stringify(payload, null, 2)], {
+            type: 'application/json',
+          });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'graph.json';
+          a.click();
+          URL.revokeObjectURL(url);
+          notify('Downloaded graph.json', 'success');
+        }}
+        onCopyJSON={() => {
+          const payload = { nodes: graphData.nodes, links: graphData.edges };
+          navigator.clipboard
+            .writeText(JSON.stringify(payload, null, 2))
+            .then(() => notify('Copied JSON to clipboard', 'success'))
+            .catch(() => notify('Copy failed', 'error'));
+        }}
         onImportRDF={onImportRDF}
         onDownloadTTL={onDownloadTTL}
         onDownloadNT={onDownloadNT}
