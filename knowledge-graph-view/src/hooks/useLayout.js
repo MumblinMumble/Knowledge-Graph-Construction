@@ -1,111 +1,147 @@
 // src/hooks/useLayout.js
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 
-export default function useLayout(networkRef, network, graphData) {
+export default function useLayout(networkRef, network /*, graphData */) {
+  const stopTimeoutRef = useRef(null);
+
+  const stopPhysics = useCallback(
+    (ds, ids) => {
+      if (!network || !ds?.update) return;
+
+      try {
+        ds.update(
+          ids.map((id) => ({
+            id,
+            physics: false,
+          })),
+        );
+
+        network.setOptions({
+          physics: { enabled: false },
+        });
+
+        if (network.stopSimulation) {
+          network.stopSimulation();
+        }
+      } catch {
+        // ignore
+      }
+    },
+    [network],
+  );
+
   const applyLayout = useCallback(
     (mode) => {
-      if (!network || !networkRef.current) return;
+      if (!network) return;
 
-      const rect = networkRef.current.getBoundingClientRect();
-      const W = rect.width || 800,
-        H = rect.height || 600;
-      const toCanvas = (dom) => network.DOMtoCanvas(dom);
-      const ids = graphData.nodes.map((n) => String(n.id));
+      const ds = network.body?.data?.nodes;
 
+      // ─────────────── FORCE-DIRECTED (animated, then freeze) ───────────────
       if (mode === 'force') {
+        if (!ds?.getIds || !ds.update) return;
+
+        const ids = ds.getIds();
+        if (!ids.length) return;
+
+        // clear any previous stop timer
+        if (stopTimeoutRef.current) {
+          clearTimeout(stopTimeoutRef.current);
+          stopTimeoutRef.current = null;
+        }
+
+        const positions = network.getPositions(ids);
+        const jitter = 40; // small random push so they can escape the ring
+
+        // Unlock + lightly jitter positions so physics can actually move them
+        ds.update(
+          ids.map((id) => {
+            const p = positions[id] || { x: 0, y: 0 };
+            return {
+              id,
+              x: p.x + (Math.random() - 0.5) * jitter,
+              y: p.y + (Math.random() - 0.5) * jitter,
+              fixed: false,
+              physics: true,
+            };
+          }),
+        );
+
+        // Physics tuned more for "push apart then chill" than endless bouncing
         network.setOptions({
-          layout: { hierarchical: { enabled: false } },
-          physics: { enabled: true },
+          layout: {
+            hierarchical: false,
+            improvedLayout: false, // better perf on big graphs
+          },
+          physics: {
+            enabled: true,
+            solver: 'forceAtlas2Based',
+            forceAtlas2Based: {
+              gravitationalConstant: -40,
+              centralGravity: 0.01,
+              springLength: 150,
+              springConstant: 0.05,
+              avoidOverlap: 0.8,
+            },
+            timestep: 0.5,
+            stabilization: {
+              enabled: false, // we’ll stop manually via timeout
+            },
+          },
         });
-        network.stabilize();
+
+        // Let big graphs run a bit longer, but cap it so it doesn't go wild
+        const durationMs = 1500 + ids.length * 2;
+
+        stopTimeoutRef.current = window.setTimeout(() => {
+          stopPhysics(ds, ids);
+        }, durationMs);
+
         return;
       }
-      if (mode === 'hierUD' || mode === 'hierLR') {
+
+      // ─────────────── HIERARCHICAL LAYOUTS ───────────────
+      const baseOptions = {
+        physics: { enabled: false },
+      };
+
+      if (mode === 'hierUD') {
         network.setOptions({
+          ...baseOptions,
           layout: {
             hierarchical: {
               enabled: true,
-              direction: mode === 'hierLR' ? 'LR' : 'UD',
+              direction: 'UD',
               sortMethod: 'hubsize',
-              nodeSpacing: 150,
-              levelSeparation: 200,
+              nodeSpacing: 200,
+              levelSeparation: 150,
             },
           },
-          physics: { enabled: false },
         });
-        network.stabilize();
-        return;
+      } else if (mode === 'hierLR') {
+        network.setOptions({
+          ...baseOptions,
+          layout: {
+            hierarchical: {
+              enabled: true,
+              direction: 'LR',
+              sortMethod: 'hubsize',
+              nodeSpacing: 200,
+              levelSeparation: 150,
+            },
+          },
+        });
+      } else {
+        // fallback: just turn physics off
+        network.setOptions(baseOptions);
       }
 
-      network.setOptions({
-        layout: { hierarchical: { enabled: false } },
-        physics: { enabled: false },
-      });
-
-      if (mode === 'circular') {
-        const n = Math.max(ids.length, 1),
-          R = Math.min(W, H) * 0.4;
-        ids.forEach((id, i) => {
-          const ang = (2 * Math.PI * i) / n;
-          const { x, y } = toCanvas({
-            x: W / 2 + R * Math.cos(ang),
-            y: H / 2 + R * Math.sin(ang),
-          });
-          network.moveNode(id, x, y);
-        });
-        network.redraw();
-        return;
-      }
-
-      if (mode === 'grid') {
-        const n = ids.length,
-          cols = Math.ceil(Math.sqrt(n)),
-          rows = Math.ceil(n / cols);
-        const pad = 40,
-          stepX = (W - 2 * pad) / Math.max(1, cols - 1),
-          stepY = (H - 2 * pad) / Math.max(1, rows - 1);
-        ids.forEach((id, i) => {
-          const r = Math.floor(i / cols),
-            c = i % cols;
-          const { x, y } = toCanvas({ x: pad + c * stepX, y: pad + r * stepY });
-          network.moveNode(id, x, y);
-        });
-        network.redraw();
-        return;
-      }
-
-      if (mode === 'concentric') {
-        const deg = {};
-        graphData.nodes.forEach((n) => (deg[n.id] = 0));
-        graphData.edges.forEach((e) => {
-          deg[e.from] = (deg[e.from] || 0) + 1;
-          deg[e.to] = (deg[e.to] || 0) + 1;
-        });
-
-        const sorted = [...graphData.nodes].sort(
-          (a, b) => (deg[b.id] || 0) - (deg[a.id] || 0),
-        );
-        const rings = 3,
-          perRing = Math.ceil(sorted.length / rings),
-          R0 = Math.min(W, H) * 0.15,
-          dR = Math.min(W, H) * 0.15;
-
-        sorted.forEach((n, idx) => {
-          const ring = Math.floor(idx / perRing),
-            pos = idx % perRing,
-            count = Math.min(perRing, sorted.length - ring * perRing);
-          const R = R0 + ring * dR,
-            ang = (2 * Math.PI * pos) / count;
-          const { x, y } = toCanvas({
-            x: W / 2 + R * Math.cos(ang),
-            y: H / 2 + R * Math.sin(ang),
-          });
-          network.moveNode(String(n.id), x, y);
-        });
-        network.redraw();
+      try {
+        network.fit({ animation: false });
+      } catch {
+        // ignore
       }
     },
-    [network, networkRef, graphData],
+    [network, stopPhysics],
   );
 
   return { applyLayout };

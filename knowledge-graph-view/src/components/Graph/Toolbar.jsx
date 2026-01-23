@@ -1,242 +1,508 @@
 // src/components/Graph/Toolbar.jsx
-import React from 'react';
-import {
-  btn,
-  btnPrimary,
-  btnGhost,
-  group,
-  menu,
-  menuLeft,
-  menuItem,
-  inp,
-} from '../../utils/styles';
-import SearchBar from './SearchBar';
-import FilterChips from './FilterChips';
+import React, { useRef, useState } from 'react';
+import './Toolbar.css';
 
-export default function Toolbar({
-  graphData,
-  filters,
-  onAddFilter,
-  onRemoveFilter,
-  onClearFilters,
-  onAddNodeClick,
-  onAddEdgeClick,
-  onHighlightNode,
-  onHighlightEdge,
-  onOpenHelp,
-  onRunString,
-  notify,
-  onFit,
-  layoutMode,
-  setLayoutMode,
-  onImportJSON,
-  onDownloadJSON,
-  onCopyJSON,
-  onImportRDF,
-  onDownloadNT,
-  onDownloadTTL,
-}) {
-  const [fileOpen, setFileOpen] = React.useState(false);
-  const [addOpen, setAddOpen] = React.useState(false);
+export default function Toolbar(props) {
+  const {
+    onAddNodeClick,
+    onAddEdgeClick,
+    onOpenHelp,
+    onRunString,
+    onFit,
+    onFocusSelection,
+    onClearFocus,
+    layoutMode,
+    setLayoutMode,
+    onImportJSON,
+    onDownloadJSON,
+    onCopyJSON,
+    onImportRDF,
+    onDownloadTTL,
+    onDownloadNT,
+    command,
+    setCommand,
+    filters = [],
+    onRemoveFilter,
+    onClearFilters,
+    views = [],
+    activeViewId = 'main',
+    onActivateView,
+    onRemoveView,
+    includeNeighbors,
+    setIncludeNeighbors,
+    onMergeSelectedViews,
+  } = props;
+
+  const [addOpen, setAddOpen] = useState(false);
+  const [fileOpen, setFileOpen] = useState(false);
+
+  const [mergeSel, setMergeSel] = useState(() => new Set());
+
+  const jsonInputRef = useRef(null);
+  const rdfInputRef = useRef(null);
+
+  const toggleMergeSel = (id) => {
+    setMergeSel((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const describeFilter = (f) => {
+    if (!f || !f.payload) return 'Filter';
+
+    const { key, value, values } = f.payload;
+    const vals = values && values.length ? values : value != null ? [value] : [];
+    const prettyVals = vals.join(' | ');
+
+    if (f.kind === 'filterNodePropEq') {
+      return `${key} = ${prettyVals}`;
+    }
+    if (f.kind === 'filterEdgePropEq') {
+      return `edge ${key} = ${prettyVals}`;
+    }
+    return 'Filter';
+  };
+
+  const handleRun = () => {
+    const trimmed = command.trim();
+    if (!trimmed || !onRunString) return;
+    onRunString(trimmed);
+  };
+
+  const handleCommandKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleRun();
+    }
+  };
+
+  const closeMenus = () => {
+    setAddOpen(false);
+    setFileOpen(false);
+  };
 
   return (
-    <div
-      style={{
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        margin: '12px 0',
-        gap: 12,
-        flexWrap: 'wrap',
-        flex: '0 0 auto',
-      }}
-    >
-      {/* Left: Add */}
-      <div style={{ ...group, minWidth: 280, flexWrap: 'wrap' }}>
-        <button
-          style={btnPrimary}
-          onClick={() => setAddOpen((v) => !v)}
-        >
-          ＋ Add ▾
-        </button>
-        {addOpen && (
-          <div style={menuLeft}>
+    <div className="kg-tb">
+      <div className="kg-tb-row-main">
+        {/* Group 1: Add */}
+        <div className="kg-tb-group kg-tb-group-add">
+          <div className="kg-dropdown">
             <button
-              style={menuItem}
-              onClick={() => {
-                setAddOpen(false);
-                onAddNodeClick();
-              }}
+              type="button"
+              className="kg-btn-ghost"
+              onClick={() => setAddOpen((v) => !v)}
             >
-              Node…
+              + Add ▾
             </button>
+
+            {addOpen && (
+              <div className="kg-dropdown-menu">
+                <button
+                  type="button"
+                  className="kg-dropdown-item"
+                  onClick={() => {
+                    setAddOpen(false);
+                    onAddNodeClick && onAddNodeClick();
+                  }}
+                >
+                  Node
+                </button>
+                <button
+                  type="button"
+                  className="kg-dropdown-item"
+                  onClick={() => {
+                    setAddOpen(false);
+                    onAddEdgeClick && onAddEdgeClick();
+                  }}
+                >
+                  Edge
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="kg-tb-separator" />
+
+        {/* Group 2: search bar + Run (with "i" inside the bar) */}
+        <div className="kg-tb-group kg-tb-group-search">
+          <div className="kg-command-wrapper">
+            <input
+              type="text"
+              className="kg-command-input"
+              placeholder="node.key=value · edge.key=value · filter node:key=value · filter edge:key=value"
+              value={command}
+              onChange={(e) => setCommand(e.target.value)}
+              onKeyDown={handleCommandKeyDown}
+            />
             <button
-              style={menuItem}
-              onClick={() => {
-                setAddOpen(false);
-                onAddEdgeClick();
-              }}
+              type="button"
+              className="kg-icon-button kg-icon-inline"
+              title="Keyboard shortcuts & tips"
+              onClick={onOpenHelp}
             >
-              Edge…
+              i
             </button>
           </div>
-        )}
-        <span style={{ fontSize: 12, color: '#6e7781', marginLeft: 6 }}>
-          Tip: double-click empty space to add a node · right-click node → node to add an
-          edge
-        </span>
-      </div>
 
-      {/* Center: Search + Fit + Layout */}
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          flex: 1,
-          minWidth: 320,
-          alignItems: 'stretch',
-          position: 'relative',
-        }}
-      >
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <SearchBar
-            graphData={graphData}
-            onHighlightNode={onHighlightNode}
-            onHighlightEdge={onHighlightEdge}
-            onAddFilter={onAddFilter}
-            onClearFilters={onClearFilters}
-            onOpenHelp={onOpenHelp}
-            notify={notify}
-            onRunString={onRunString}
-          />
           <button
-            style={btnGhost}
-            onClick={onFit}
-            title="Fit to screen"
+            type="button"
+            className="kg-btn-primary"
+            onClick={handleRun}
           >
-            Fit
+            Run
           </button>
+        </div>
+
+        <div className="kg-tb-separator" />
+
+        {/* Group 3: Fit + layout + focus */}
+        <div className="kg-tb-group kg-tb-group-layout">
+          <button
+            type="button"
+            className="kg-btn-ghost"
+            onClick={onFit}
+          >
+            Center
+          </button>
+
           <select
-            style={{ ...inp, width: 200 }}
+            className="kg-layout-select"
             value={layoutMode}
-            onChange={(e) => setLayoutMode(e.target.value)}
-            title="Layout"
+            onChange={(e) => setLayoutMode && setLayoutMode(e.target.value)}
           >
             <option value="force">Force-directed</option>
-            <option value="hierUD">Hierarchical (Top→Bottom)</option>
-            <option value="hierLR">Hierarchical (Left→Right)</option>
-            <option value="circular">Circular</option>
-            <option value="grid">Grid</option>
-            <option value="concentric">Concentric (by degree)</option>
+            <option value="hierUD">Hierarchical (vertical)</option>
+            <option value="hierLR">Hierarchical (horizontal)</option>
           </select>
+
+          <button
+            type="button"
+            className="kg-btn-ghost"
+            onClick={onFocusSelection}
+            disabled={!onFocusSelection}
+          >
+            Focus selection
+          </button>
+
+          <button
+            type="button"
+            className={`kg-secondary-pill ${
+              includeNeighbors ? 'kg-secondary-pill--active' : ''
+            }`}
+            onClick={() => setIncludeNeighbors((v) => !v)}
+            title="When on, Focus includes 1-hop neighbors of selected nodes"
+          >
+            Neighbors: {includeNeighbors ? 'On' : 'Off'}
+          </button>
+
+          <button
+            type="button"
+            className="kg-btn-ghost"
+            onClick={onClearFocus}
+            disabled={!onClearFocus}
+          >
+            Clear focus
+          </button>
         </div>
-        <FilterChips
-          filters={filters}
-          onRemove={onRemoveFilter}
-          onClear={onClearFilters}
-        />
+
+        <div className="kg-tb-separator" />
+
+        {/* Group 4: File */}
+        <div className="kg-tb-group kg-tb-group-file">
+          <div className="kg-dropdown">
+            <button
+              type="button"
+              className="kg-btn-ghost"
+              onClick={() => setFileOpen((v) => !v)}
+            >
+              File ▾
+            </button>
+
+            {fileOpen && (
+              <div className="kg-dropdown-menu kg-dropdown-menu-right">
+                <div className="kg-dropdown-label">JSON</div>
+
+                <button
+                  type="button"
+                  className="kg-dropdown-item"
+                  onClick={() => {
+                    closeMenus();
+                    jsonInputRef.current?.click();
+                  }}
+                >
+                  Import JSON…
+                </button>
+
+                <button
+                  type="button"
+                  className="kg-dropdown-item"
+                  onClick={() => {
+                    closeMenus();
+                    onDownloadJSON && onDownloadJSON();
+                  }}
+                >
+                  Download JSON (current view)
+                </button>
+
+                <button
+                  type="button"
+                  className="kg-dropdown-item"
+                  onClick={() => {
+                    closeMenus();
+                    onCopyJSON && onCopyJSON();
+                  }}
+                >
+                  Copy JSON (current view)
+                </button>
+
+                <div className="kg-dropdown-separator" />
+
+                <div className="kg-dropdown-label">RDF</div>
+
+                <button
+                  type="button"
+                  className="kg-dropdown-item"
+                  onClick={() => {
+                    closeMenus();
+                    rdfInputRef.current?.click();
+                  }}
+                >
+                  Import RDF…
+                </button>
+
+                <button
+                  type="button"
+                  className="kg-dropdown-item"
+                  onClick={() => {
+                    closeMenus();
+                    onDownloadTTL && onDownloadTTL();
+                  }}
+                >
+                  Download Turtle (.ttl) (current view)
+                </button>
+
+                <button
+                  type="button"
+                  className="kg-dropdown-item"
+                  onClick={() => {
+                    closeMenus();
+                    onDownloadNT && onDownloadNT();
+                  }}
+                >
+                  Download N-Triples (.nt) (current view)
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
-      {/* Right: File */}
-      <div style={group}>
-        <button
-          style={btn}
-          onClick={() => setFileOpen((v) => !v)}
+      {/* NEW: active filters as chips */}
+      {filters.length > 0 && (
+        <div
+          className="kg-tb-filters-row"
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 8,
+            alignItems: 'center',
+            marginTop: 8,
+          }}
         >
-          File ▾
-        </button>
-
-        {fileOpen && (
-          <div style={menu}>
-            {/* Import JSON */}
-            <label
+          {filters.map((f) => (
+            <button
+              key={f.id}
+              type="button"
               style={{
-                ...menuItem,
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: 6,
+                padding: '2px 8px',
+                borderRadius: 999,
+                border: '1px solid #d0d7de',
+                background: '#f6f8fa',
+                fontSize: 11,
                 cursor: 'pointer',
               }}
+              onClick={() => onRemoveFilter && onRemoveFilter(f.id)}
+              title="Click to remove this filter"
             >
-              Import Json
-              <input
-                type="file"
-                accept=".json"
-                onChange={(e) => {
-                  onImportJSON?.(e);
-                  setFileOpen(false);
-                  e.target.value = '';
-                }}
-                style={{ display: 'none' }}
-              />
-            </label>
-
-            {/* Download / Copy JSON */}
-            <button
-              style={menuItem}
-              onClick={() => {
-                setFileOpen(false);
-                onDownloadJSON?.();
-              }}
-            >
-              Download Json
-            </button>
-            <button
-              style={menuItem}
-              onClick={() => {
-                setFileOpen(false);
-                onCopyJSON?.();
-              }}
-            >
-              Copy JSON
-            </button>
-
-            {/* Import RDF — same styling as Import Json */}
-            {onImportRDF && (
-              <label
+              <span>{describeFilter(f)}</span>
+              <span
                 style={{
-                  ...menuItem,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  cursor: 'pointer',
+                  fontSize: 12,
+                  lineHeight: 1,
+                  paddingLeft: 2,
                 }}
               >
-                Import RDF (.nt/.ttl)
-                <input
-                  type="file"
-                  accept=".nt,.ttl"
-                  onChange={(e) => {
-                    onImportRDF(e);
-                    setFileOpen(false);
-                    e.target.value = '';
-                  }}
-                  style={{ display: 'none' }}
-                />
-              </label>
-            )}
-            <button
-              style={menuItem}
-              onClick={() => {
-                setFileOpen(false);
-                onDownloadTTL && onDownloadTTL();
-              }}
-            >
-              Download RDF (TTL)
+                ×
+              </span>
             </button>
+          ))}
 
+          {onClearFilters && (
             <button
-              style={menuItem}
-              onClick={() => {
-                setFileOpen(false);
-                onDownloadNT && onDownloadNT();
+              type="button"
+              style={{
+                marginLeft: 'auto',
+                fontSize: 11,
+                padding: '2px 8px',
+                borderRadius: 999,
+                border: '1px solid #d0d7de',
+                background: '#ffffff',
+                cursor: 'pointer',
               }}
+              onClick={onClearFilters}
             >
-              Download RDF (N-Triples)
+              Clear all
             </button>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      )}
+
+      {/* NEW: saved views as chips */}
+      {views.length > 0 && (
+        <div
+          className="kg-tb-views-row"
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 8,
+            alignItems: 'center',
+            marginTop: 8,
+          }}
+        >
+          {/* Main view chip */}
+          <button
+            type="button"
+            onClick={(e) => {
+              if (e.ctrlKey || e.metaKey) {
+                toggleMergeSel('main');
+              } else {
+                setMergeSel(new Set());
+                onActivateView && onActivateView('main');
+              }
+            }}
+            style={{
+              padding: '2px 10px',
+              borderRadius: 999,
+              border: '1px solid #d0d7de',
+              background: activeViewId === 'main' ? '#0366d6' : '#f6f8fa',
+              color: activeViewId === 'main' ? '#ffffff' : '#24292f',
+              fontSize: 11,
+              cursor: 'pointer',
+              outline: mergeSel.has('main') ? '2px solid #111' : 'none',
+              outlineOffset: 2,
+            }}
+            title="Click to switch. Ctrl/Cmd-click to select for merging."
+          >
+            Main
+          </button>
+
+          {views.map((v) => (
+            <button
+              key={v.id}
+              type="button"
+              onClick={(e) => {
+                if (e.ctrlKey || e.metaKey) {
+                  toggleMergeSel(v.id);
+                } else {
+                  setMergeSel(new Set());
+                  onActivateView && onActivateView(v.id);
+                }
+              }}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '2px 10px',
+                borderRadius: 999,
+                border: '1px solid #d0d7de',
+                background: activeViewId === v.id ? '#0366d6' : '#f6f8fa',
+                color: activeViewId === v.id ? '#ffffff' : '#24292f',
+                fontSize: 11,
+                cursor: 'pointer',
+                outline: mergeSel.has(v.id) ? '2px solid #111' : 'none',
+                outlineOffset: 2,
+              }}
+              title="Click to switch. Ctrl/Cmd-click to select for merging."
+            >
+              <span>{v.label}</span>
+              <span
+                style={{
+                  fontSize: 12,
+                  lineHeight: 1,
+                  paddingLeft: 2,
+                  cursor: 'pointer',
+                }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRemoveView && onRemoveView(v.id);
+                  setMergeSel((prev) => {
+                    const next = new Set(prev);
+                    next.delete(v.id);
+                    return next;
+                  });
+                }}
+                title="Remove this view"
+              >
+                ×
+              </span>
+            </button>
+          ))}
+
+          <button
+            type="button"
+            disabled={mergeSel.size < 2}
+            onClick={() => {
+              if (!onMergeSelectedViews) return;
+              onMergeSelectedViews(Array.from(mergeSel));
+              setMergeSel(new Set());
+            }}
+            style={{
+              marginLeft: 'auto',
+              fontSize: 11,
+              padding: '2px 10px',
+              borderRadius: 999,
+              border: '1px solid #d0d7de',
+              background: mergeSel.size < 2 ? '#f6f8fa' : '#ffffff',
+              cursor: mergeSel.size < 2 ? 'not-allowed' : 'pointer',
+              opacity: mergeSel.size < 2 ? 0.6 : 1,
+            }}
+            title="Ctrl/Cmd-click 2+ views, then merge"
+          >
+            Merge selected
+          </button>
+        </div>
+      )}
+
+      {/* hidden inputs for imports */}
+      <input
+        type="file"
+        ref={jsonInputRef}
+        accept=".json,application/json"
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          closeMenus();
+          onImportJSON && onImportJSON(e);
+          if (jsonInputRef.current) jsonInputRef.current.value = '';
+        }}
+      />
+      <input
+        type="file"
+        ref={rdfInputRef}
+        accept=".ttl,.nt"
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          closeMenus();
+          onImportRDF && onImportRDF(e);
+          if (rdfInputRef.current) rdfInputRef.current.value = '';
+        }}
+      />
     </div>
   );
 }

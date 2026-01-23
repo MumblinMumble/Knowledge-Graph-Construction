@@ -1,0 +1,85 @@
+/* ---- Graph layout ---- */
+
+.kg-graph {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100vh;
+  overflow: hidden;
+  flex: 1;
+}
+
+/* container strip that holds the toolbar */
+.kg-graph-toolbar {
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+}
+
+/* hint + canvas */
+
+.kg-graph-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+  min-height: 0;
+}
+
+.kg-graph-hint-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.kg-graph-hint {
+  margin: 0;
+  font-size: 0.7rem;
+  color: #9ca3af;
+}
+
+.kg-secondary-pill {
+  border-radius: 999px;
+  border: 1px solid #e5e7eb;
+  background: #f9fafb;
+  font-size: 0.75rem;
+  padding: 4px 10px;
+  cursor: pointer;
+  color: #374151;
+}
+
+.kg-secondary-pill:hover {
+  background: #f3f4f6;
+}
+
+.kg-graph-canvas {
+  flex: 1;
+  border-radius: 12px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  padding: 4px;
+  overflow: hidden;
+  height: 100%;
+  min-height: 0;
+}
+
+.kg-graph-canvas-inner {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  min-height: 0;
+}
+
+/* selection box */
+.kg-graph-marquee {
+  position: absolute;
+  border: 1px dashed rgba(120, 200, 255, 0.9);
+  background-color: rgba(120, 200, 255, 0.15);
+  pointer-events: none;
+  z-index: 10;
+}

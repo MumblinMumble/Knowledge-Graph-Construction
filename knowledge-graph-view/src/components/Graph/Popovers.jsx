@@ -171,8 +171,62 @@ export function EdgeFormModal({ open, defaults, onClose, onSubmit }) {
   );
 }
 
-export const HelpModal = ({ open, onClose, onRun }) => {
+export const HelpModal = ({ open, onClose, onInsertCommand }) => {
   if (!open) return null;
+
+  const searchExamples = [
+    {
+      cmd: 'alice',
+      desc: 'Find nodes where label, name or id contains "alice".',
+    },
+    {
+      cmd: 'node.label=Person',
+      desc: 'Nodes whose label contains "Person".',
+    },
+    {
+      cmd: 'node.id=5',
+      desc: 'Node with id 5 (exact match).',
+    },
+    {
+      cmd: 'edge.label=KNOWS',
+      desc: 'Edges whose label contains "KNOWS".',
+    },
+    {
+      cmd: 'type=Person',
+      desc: 'Tries matching the "type" field on nodes first, then edges.',
+    },
+  ];
+
+  const filterExamples = [
+    {
+      cmd: 'filter node:label=Person',
+      desc: 'Keep only nodes with label "Person", neighbours and incident edges.',
+    },
+    {
+      cmd: 'filter node:type=Person|Company',
+      desc: 'Union: keep nodes where type is Person OR Company.',
+    },
+    {
+      cmd: 'filter edge:label=RELATED_TO',
+      desc: 'Keep only edges with that label and their endpoint nodes.',
+    },
+    {
+      cmd: 'filter clear',
+      desc: 'Remove all active filters and show the full graph again.',
+    },
+  ];
+
+  const viewExamples = [
+    {
+      cmd: 'view copy',
+      desc: 'Copies the current view (what you see right now) as JSON to your clipboard.',
+    },
+    {
+      cmd: 'view paste',
+      desc: 'Reads JSON from your clipboard, merges it into the current view, and saves a new merged view.',
+    },
+  ];
+
   return (
     <div
       style={{
@@ -195,9 +249,12 @@ export const HelpModal = ({ open, onClose, onRun }) => {
           padding: 16,
           width: 560,
           maxWidth: '90vw',
+          maxHeight: '80vh',
+          overflowY: 'auto',
           boxShadow: '0 12px 32px rgba(0,0,0,0.12)',
         }}
       >
+        {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <h4 style={{ margin: 0, flex: 1 }}>Search & Filter Cheat-Sheet</h4>
           <button
@@ -207,37 +264,195 @@ export const HelpModal = ({ open, onClose, onRun }) => {
             Close
           </button>
         </div>
+
         <div style={{ fontSize: 13, color: '#57606a', marginTop: 4 }}>
-          Searches highlight results; Filters add chips and hide everything else.
+          Use the big bar + <strong>Run</strong> to search or filter.
+          <br />
+          Searches highlight results; filters add chips and hide everything else.
         </div>
-        {[
-          ['node:id=26', 'focus node by property'],
-          ['edge:label=KNOWS', 'highlight matching edges'],
-          ['filter node:id=26', 'show node + incident edges + neighbors'],
-          ['filter edge:label=KNOWS', 'show only edges with that label + endpoints'],
-          ['reset', 'clear all filters'],
-        ].map(([cmd, desc]) => (
+
+        {/* SEARCH SECTION */}
+        <div style={{ marginTop: 16 }}>
           <div
-            key={cmd}
             style={{
-              display: 'grid',
-              gridTemplateColumns: '1fr auto',
-              gap: 8,
-              marginTop: 8,
+              fontWeight: 600,
+              fontSize: 13,
+              marginBottom: 4,
             }}
           >
-            <code>{cmd}</code>
-            <button
-              style={btn}
-              onClick={() => onRun(cmd)}
+            🔍 Search examples
+          </div>
+          <div style={{ fontSize: 12, color: '#57606a', marginBottom: 6 }}>
+            Click <strong>Try</strong> to copy the command into the bar.
+          </div>
+
+          {searchExamples.map(({ cmd, desc }) => (
+            <div
+              key={cmd}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr auto',
+                gap: 8,
+                marginTop: 8,
+              }}
             >
-              Try
-            </button>
-            <div style={{ gridColumn: '1/-1', fontSize: 12, color: '#6e7781' }}>
-              {desc}
+              <code>{cmd}</code>
+              {onInsertCommand && (
+                <button
+                  style={btn}
+                  onClick={() => {
+                    if (onInsertCommand) onInsertCommand(cmd);
+                    onClose();
+                  }}
+                >
+                  Try
+                </button>
+              )}
+              <div
+                style={{
+                  gridColumn: '1 / -1',
+                  fontSize: 12,
+                  color: '#6e7781',
+                }}
+              >
+                {desc}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* FILTER SECTION */}
+        <div style={{ marginTop: 20 }}>
+          <div
+            style={{
+              fontWeight: 600,
+              fontSize: 13,
+              marginBottom: 4,
+            }}
+          >
+            🎯 Filter examples
+          </div>
+          <div style={{ fontSize: 12, color: '#57606a', marginBottom: 6 }}>
+            Filters stack: each new one narrows the visible subgraph further.
+            <br />
+            Use <code>|</code> inside a value for unions, e.g.{' '}
+            <code>type=Person|Company</code>.
+          </div>
+
+          {filterExamples.map(({ cmd, desc }) => (
+            <div
+              key={cmd}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr auto',
+                gap: 8,
+                marginTop: 8,
+              }}
+            >
+              <code>{cmd}</code>
+              {onInsertCommand && (
+                <button
+                  style={btn}
+                  onClick={() => {
+                    if (onInsertCommand) onInsertCommand(cmd);
+                    onClose();
+                  }}
+                >
+                  Try
+                </button>
+              )}
+              <div
+                style={{
+                  gridColumn: '1 / -1',
+                  fontSize: 12,
+                  color: '#6e7781',
+                }}
+              >
+                {desc}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* VIEWS SECTION */}
+        <div style={{ marginTop: 20 }}>
+          <div
+            style={{
+              fontWeight: 600,
+              fontSize: 13,
+              marginBottom: 4,
+            }}
+          >
+            🧩 Views (save / switch / merge)
+          </div>
+
+          <div style={{ fontSize: 12, color: '#57606a', marginBottom: 10 }}>
+            <div style={{ marginBottom: 6 }}>
+              <b>Switch view:</b> click a view chip (or <b>Main</b>).
+            </div>
+
+            <div style={{ marginBottom: 6 }}>
+              <b>Merge views (UI):</b> hold <b>Ctrl</b> (Windows/Linux) or <b>Cmd</b>{' '}
+              (Mac) and click <b>2+</b> view chips (including <b>Main</b>).
+              Selected-for-merge chips get a dark outline. Then click{' '}
+              <b>Merge selected</b>.
+            </div>
+
+            <div style={{ marginBottom: 6 }}>
+              <b>Remove a view:</b> click the <b>×</b> on the chip.
+            </div>
+
+            <div>
+              <b>Copy/paste workflow:</b> View A → <code>view copy</code>, switch to View
+              B →<code>view paste</code> (creates a new merged view).
             </div>
           </div>
-        ))}
+
+          {viewExamples.map(({ cmd, desc }) => (
+            <div
+              key={cmd}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr auto',
+                gap: 8,
+                marginTop: 8,
+              }}
+            >
+              <code>{cmd}</code>
+              {onInsertCommand && (
+                <button
+                  style={btn}
+                  onClick={() => {
+                    onInsertCommand(cmd);
+                    onClose();
+                  }}
+                >
+                  Try
+                </button>
+              )}
+              <div
+                style={{
+                  gridColumn: '1 / -1',
+                  fontSize: 12,
+                  color: '#6e7781',
+                }}
+              >
+                {desc}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div
+          style={{
+            marginTop: 16,
+            fontSize: 11,
+            color: '#8c959f',
+          }}
+        >
+          Tip: Press <code>Enter</code> in the search bar or click <strong>Run</strong> to
+          execute the current command.
+        </div>
       </div>
     </div>
   );

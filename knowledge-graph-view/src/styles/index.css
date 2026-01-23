@@ -1,0 +1,27 @@
+/* ---- Reset / base ---- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #f3f4f6;
+  color: #111827;
+  overflow: hidden;
+}
+
+/* Optional CRA leftover – safe to keep or delete */
+.App {
+  text-align: center;
+}

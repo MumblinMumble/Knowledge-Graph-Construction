@@ -22,7 +22,7 @@ export function makeJsonImportHandler({
     network?.setOptions({
       physics: { enabled: false },
       layout: { improvedLayout: false },
-      interaction: { hover: false, zoomSpeed: 0.8 },
+      interaction: { hover: false, zoomSpeed: 0.8, multiselect: false },
       edges: { smooth: false },
       nodes: { shadow: false },
     });
@@ -36,7 +36,10 @@ export function makeJsonImportHandler({
         notify(`JSON parse failed: ${msg.data.message}`, 'error', 4000);
         suspendLayoutRef.current = false;
         skipVisSyncRef.current = false;
-        network?.setOptions({ physics: { enabled: true }, interaction: { hover: true } });
+        network?.setOptions({
+          physics: { enabled: true },
+          interaction: { hover: true, multiselect: false },
+        });
         worker.terminate();
         return;
       }
@@ -82,7 +85,7 @@ export function makeJsonImportHandler({
               network.fit({ animation: false });
               network.setOptions({
                 physics: { enabled: true },
-                interaction: { hover: true, zoomSpeed: 0.8 },
+                interaction: { hover: true, zoomSpeed: 0.8, multiselect: false },
               });
               setGraphData({ nodes, edges });
               notify(

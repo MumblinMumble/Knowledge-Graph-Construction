@@ -5,6 +5,8 @@ import useVisNetwork from '../../hooks/useVisNetwork';
 import useLayout from '../../hooks/useLayout';
 import Toolbar from './Toolbar';
 import PropertyPanel from './PropertyPanel';
+import SparqlModal from './SparqlModal';
+import { runSparqlSelect, rowsToGraph, resetSparqlIdCache } from './io/sparql';
 
 import {
   QuickAddNodePopover,
@@ -16,59 +18,109 @@ import {
 } from './Popovers';
 
 import { applyVisTheme } from './utils/theme';
-import { toVisNode, toVisEdge, iriTail } from './utils/mappers';
+import { toVisNode, toVisEdge } from './utils/mappers';
 import { stripHidden } from './utils/stripHidden';
 import { makeJsonImportHandler } from './io/jsonImport';
 import { makeRdfImportHandler } from './io/rdfImport';
 import { serializeGraphToRDF } from './io/rdfExport';
+import './Graph.css';
+
+const SPARQL_ENABLED = false; // keep SPARQL code, but hide UI + hotkeys
 
 export default function Graph() {
-  // vis setup
   const { networkRef, network } = useVisNetwork();
 
-  // canonical data
+  // Canonical data driving the canvas
   const [graphData, setGraphData] = useState({ nodes: [], edges: [] });
 
-  // layout
+  // Search bar text (Toolbar)
+  const [command, setCommand] = useState('');
+
+  // Focus behavior
+  const [includeNeighbors, setIncludeNeighbors] = useState(true);
+
+  // Keep a copy of the full baseline graph (restored when clearing SPARQL view)
+  const fullGraphRef = useRef(null);
+  const [sparqlOpen, setSparqlOpen] = useState(false);
+  const [sparqlActive, setSparqlActive] = useState(false);
+
+  // Box (marquee) selection
+  const [marqueeBox, setMarqueeBox] = useState(null); // { left, top, width, height } | null
+  const marqueeStartRef = useRef(null);
+  const isMarqueeActiveRef = useRef(false);
+  const marqueeSelectionRef = useRef([]);
+  const marqueeAdditiveRef = useRef(false);
+
+  // Layout
   const [layoutMode, setLayoutMode] = useState('force');
   const { applyLayout } = useLayout(networkRef, network, graphData);
 
-  // suspend layout while we animate or import
-  const suspendLayoutRef = useRef(false);
-  useEffect(() => {
-    if (suspendLayoutRef.current) return;
-    applyLayout(layoutMode);
-  }, [layoutMode, applyLayout, graphData.nodes.length, graphData.edges.length]);
+  // Track previous layout mode so we know when we *enter* "force"
+  const prevLayoutModeRef = useRef(layoutMode);
 
-  // selection + panel positioning
-  const [selected, setSelected] = useState(null); // { type:'Node'|'Edge', data }
+  // Skip layout during animations/imports
+  const suspendLayoutRef = useRef(false);
+
+  // Selection + panel
+  const [selected, setSelected] = useState(null);
   const [panelPos, setPanelPos] = useState({ x: 0, y: 0 });
   const PANEL_W = 360;
   const PANEL_OFFSET = 12;
 
-  // import batching
-  const skipVisSyncRef = useRef(false); // skip React→vis setData during big imports
+  // Import batching
+  const skipVisSyncRef = useRef(false);
+  const selRef = useRef({ nodes: new Set(), edges: new Set() }); // ids as strings
+  const lastPointerModsRef = useRef({ ctrl: false, meta: false });
   const BIG_IMPORT_THRESHOLD = 6000;
   const BATCH_SIZE_NODES = 3000;
   const BATCH_SIZE_EDGES = 4000;
 
-  // export helpers
-  const { namedNode, blankNode, literal, quad } = DataFactory;
+  // Export helpers
+  const { namedNode, blankNode, literal } = DataFactory;
 
-  // filters
+  // Saved subgraph views (e.g. "View 1", "View 2")
+  const [views, setViews] = useState([]);
+  const [activeViewId, setActiveViewId] = useState('main'); // 'main' or a view.id
+
+  // Global filters (apply to whichever view is active)
   const [filters, setFilters] = useState([]);
-  const addFilter = (f) =>
+
+  // Only what is currently visible (after filters)
+  const getVisibleSubgraph = useCallback(() => {
+    // nodes that are not hidden
+    const visibleNodes = graphData.nodes.filter((n) => !n.hidden);
+    const visibleNodeIds = new Set(visibleNodes.map((n) => String(n.id)));
+
+    // edges that are not hidden AND whose endpoints are both visible
+    const visibleEdges = graphData.edges.filter((e) => {
+      if (e.hidden) return false;
+      const from = String(e.from);
+      const to = String(e.to);
+      return visibleNodeIds.has(from) && visibleNodeIds.has(to);
+    });
+
+    return { nodes: visibleNodes, edges: visibleEdges };
+  }, [graphData]);
+
+  const addFilter = (f) => {
     setFilters((prev) => [
       ...prev,
       { ...f, id: `${Date.now()}_${Math.random().toString(36).slice(2)}` },
     ]);
-  const removeFilter = (id) => setFilters((prev) => prev.filter((f) => f.id !== id));
-  const clearAllFilters = () => setFilters([]);
+  };
 
-  // edge mode + popovers
+  const removeFilter = (id) => {
+    setFilters((prev) => prev.filter((f) => f.id !== id));
+  };
+
+  const clearAllFilters = () => {
+    setFilters([]);
+  };
+
+  // Edge creation UI
   const [edgeFrom, setEdgeFrom] = useState(null);
-  const [quickAdd, setQuickAdd] = useState(null); // { x,y } container-relative
-  const [quickEdge, setQuickEdge] = useState(null); // { x,y, from,to }
+  const [quickAdd, setQuickAdd] = useState(null);
+  const [quickEdge, setQuickEdge] = useState(null);
   const [edgeFormOpen, setEdgeFormOpen] = useState(false);
   const [edgeFormDefaults, setEdgeFormDefaults] = useState({
     from: '',
@@ -76,7 +128,7 @@ export default function Graph() {
     label: '',
   });
 
-  // help + toast
+  // Help + toast
   const [helpOpen, setHelpOpen] = useState(false);
   const [toast, setToast] = useState(null);
   const notifyTimer = useRef(null);
@@ -86,33 +138,73 @@ export default function Graph() {
     notifyTimer.current = window.setTimeout(() => setToast(null), ms);
   }, []);
 
-  // ---------- theme ----------
+  // Theme
   useEffect(() => {
     if (!network) return;
     applyVisTheme(network);
   }, [network]);
 
-  // ---------- mapping ----------
-  const visNodes = useMemo(() => graphData.nodes.map(toVisNode), [graphData.nodes]);
+  // Helper: always use String(node.id) as vis id
+  const toVisNodeStable = useCallback((n) => {
+    const v = toVisNode(n) || {};
+    const rawId = n.id;
+    const visId = String(rawId);
+    return {
+      ...v,
+      id: visId, // vis-network id
+      _rawId: rawId, // keep original just in case
+    };
+  }, []);
+
+  // Map to vis
+  const visNodes = useMemo(
+    () => graphData.nodes.map(toVisNodeStable),
+    [graphData.nodes, toVisNodeStable],
+  );
   const visEdges = useMemo(() => graphData.edges.map(toVisEdge), [graphData.edges]);
 
-  // push data to vis
+  // Normal React → vis sync + layout
   useEffect(() => {
     if (!network || skipVisSyncRef.current) return;
-    network.setData({ nodes: visNodes, edges: visEdges });
-  }, [network, visNodes, visEdges]);
 
-  // ---------- helpers to ensure new nodes exist before selecting ----------
+    const prevMode = prevLayoutModeRef.current;
+    const switchingToForce = layoutMode === 'force' && prevMode !== 'force';
+
+    if (switchingToForce) {
+      console.debug('[Graph] switching to force → reset vis DataSets');
+      network.setData({ nodes: [], edges: [] });
+    }
+
+    // Push current React state into vis
+    network.setData({ nodes: visNodes, edges: visEdges });
+
+    prevLayoutModeRef.current = layoutMode;
+
+    if (!graphData.nodes.length) return;
+
+    // If we're in "no layout while filtering / focusing" mode, just update data.
+    if (suspendLayoutRef.current) return;
+
+    console.debug(
+      '[Graph] applying layout',
+      layoutMode,
+      'nodes =',
+      graphData.nodes.length,
+    );
+    applyLayout(layoutMode);
+  }, [network, visNodes, visEdges, graphData.nodes.length, layoutMode, applyLayout]);
+
+  // Fast path insert (used by QuickAdd)
   const pushVisNodeImmediate = useCallback(
     (node) => {
       if (!network) return false;
       if (!network.body?.data?.nodes) network.setData({ nodes: [], edges: [] });
       const ds = network.body?.data?.nodes;
       if (!ds?.update) return false;
-      ds.update([toVisNode(node)]);
+      ds.update([toVisNodeStable(node)]);
       return true;
     },
-    [network],
+    [network, toVisNodeStable],
   );
 
   const waitForVisNode = useCallback(
@@ -126,7 +218,7 @@ export default function Graph() {
     [network],
   );
 
-  // positioning helpers
+  // Panel positioning
   const clampToContainer = useCallback(
     (x, y) => {
       const c = networkRef.current;
@@ -138,7 +230,6 @@ export default function Graph() {
     },
     [networkRef],
   );
-
   const setPopupNearNode = useCallback(
     (nodeId) => {
       if (!network) return;
@@ -149,7 +240,6 @@ export default function Graph() {
     },
     [clampToContainer, network],
   );
-
   const setPopupNearEdge = useCallback(
     (edge) => {
       if (!network) return;
@@ -162,29 +252,29 @@ export default function Graph() {
     },
     [clampToContainer, network],
   );
-
   const repositionPopup = useCallback(() => {
     if (!selected) return;
     if (selected.type === 'Node') setPopupNearNode(selected.data.id);
     else setPopupNearEdge(selected.data);
   }, [selected, setPopupNearNode, setPopupNearEdge]);
 
-  // smooth camera helper + UI gate during animation
+  // Camera helper
   const isAnimatingCameraRef = useRef(false);
   const animateTo = useCallback(
     ({ position, scale, duration = 650, easing = 'easeInOutCubic' }) => {
       if (!network) return;
       isAnimatingCameraRef.current = true;
-
       const prevInteraction = network?.options?.interaction || {};
-      network.setOptions({ interaction: { ...prevInteraction, hover: false } });
-
+      network.setOptions({
+        interaction: { ...prevInteraction, hover: false, multiselect: false },
+      });
       network.once('animationFinished', () => {
         isAnimatingCameraRef.current = false;
-        network.setOptions({ interaction: { ...prevInteraction, hover: true } });
+        network.setOptions({
+          interaction: { ...prevInteraction, hover: true, multiselect: false },
+        });
         requestAnimationFrame(() => repositionPopup());
       });
-
       network.moveTo({
         position,
         scale,
@@ -194,12 +284,83 @@ export default function Graph() {
     [network, repositionPopup],
   );
 
-  // interactions
+  // Interactions
+  const suppressNextClickRef = useRef(false);
   const followRafRef = useRef(0);
   useEffect(() => {
     if (!network) return;
 
+    network.setOptions({
+      interaction: {
+        ...(network.options?.interaction || {}),
+        multiselect: false,
+      },
+    });
+
+    const applySelection = () => {
+      const nodes = Array.from(selRef.current.nodes);
+      const edges = Array.from(selRef.current.edges);
+
+      requestAnimationFrame(() => {
+        if (!network) return;
+        network.setSelection({ nodes, edges }, { unselectAll: true });
+      });
+    };
+
     const onClick = (params) => {
+      if (suppressNextClickRef.current) {
+        suppressNextClickRef.current = false;
+        return;
+      }
+
+      const { ctrl, meta } = lastPointerModsRef.current;
+      const toggle = !!(ctrl || meta);
+
+      // Node click
+      if (params.nodes?.length) {
+        const id = String(params.nodes[0]);
+
+        if (!toggle) {
+          selRef.current.nodes = new Set([id]);
+          selRef.current.edges = new Set(); // optional: clear edges when clicking a node
+        } else {
+          const s = selRef.current.nodes;
+          if (s.has(id)) s.delete(id);
+          else s.add(id);
+        }
+
+        applySelection();
+        return;
+      }
+
+      // Edge click
+      if (params.edges?.length) {
+        const id = String(params.edges[0]);
+
+        if (!toggle) {
+          selRef.current.edges = new Set([id]);
+          selRef.current.nodes = new Set(); // optional: clear nodes when clicking an edge
+        } else {
+          const s = selRef.current.edges;
+          if (s.has(id)) s.delete(id);
+          else s.add(id);
+        }
+
+        applySelection();
+        return;
+      }
+
+      // Empty space: (choose behavior)
+      // If you want empty click to clear selection:
+      selRef.current.nodes = new Set();
+      selRef.current.edges = new Set();
+      applySelection();
+
+      setSelected(null);
+    };
+
+    const onDblClick = (params) => {
+      // Double-click node -> open panel
       if (params.nodes?.length) {
         const id = params.nodes[0];
         const node = graphData.nodes.find((n) => String(n.id) === String(id));
@@ -209,6 +370,8 @@ export default function Graph() {
         }
         return;
       }
+
+      // Double-click edge -> open panel
       if (params.edges?.length) {
         const id = params.edges[0];
         const edge = graphData.edges.find((e) => String(e.id) === String(id));
@@ -218,12 +381,8 @@ export default function Graph() {
         }
         return;
       }
-      setSelected(null);
-    };
 
-    // DOUBLE-CLICK → open on-map label popover
-    const onDblClick = (params) => {
-      if (params.nodes?.length || params.edges?.length) return;
+      // Double-click empty -> your existing "add node" behavior
       const { DOM } = params.pointer;
       setQuickAdd({ x: DOM.x, y: DOM.y });
     };
@@ -272,6 +431,13 @@ export default function Graph() {
       });
     };
 
+    // capture ctrl/meta state reliably (vis sometimes loses it)
+    const container = networkRef.current;
+    const onMouseDownCapture = (e) => {
+      lastPointerModsRef.current = { ctrl: e.ctrlKey, meta: e.metaKey };
+    };
+    container?.addEventListener('mousedown', onMouseDownCapture, true);
+
     network.on('click', onClick);
     network.on('doubleClick', onDblClick);
     network.on('oncontext', onContext);
@@ -289,6 +455,7 @@ export default function Graph() {
       network.off('zoom', follow);
       network.off('stabilized', follow);
       window.removeEventListener('resize', follow);
+      container?.removeEventListener('mousedown', onMouseDownCapture, true);
     };
   }, [
     network,
@@ -299,11 +466,17 @@ export default function Graph() {
     setPopupNearNode,
     setPopupNearEdge,
     selected,
+    networkRef,
   ]);
 
-  // ESC to close transient UI
+  // Hotkeys
   useEffect(() => {
     const onKey = (e) => {
+      if (SPARQL_ENABLED && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setSparqlOpen(true);
+        return;
+      }
       if (e.key === 'Escape') {
         if (edgeFrom != null) {
           setEdgeFrom(null);
@@ -314,92 +487,133 @@ export default function Graph() {
         if (quickEdge) setQuickEdge(null);
         setEdgeFormOpen(false);
         setHelpOpen(false);
+        setSparqlOpen(false);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [edgeFrom, quickAdd, quickEdge, notify, network]);
 
-  // filters → hidden flags
+  // Simple property filters (not SPARQL)
   const applyActiveFilters = useCallback((filtersList) => {
     if (!filtersList.length) return;
+
+    // normalize: trim + lowercase
+    const norm = (v) =>
+      String(v ?? '')
+        .trim()
+        .toLowerCase();
+
+    // While filtering, don't re-run layouts
+    suspendLayoutRef.current = true;
+
     setGraphData((prev) => {
-      const allNodeIds = prev.nodes.map((n) => n.id);
-      const allEdgeIds = prev.edges.map((e) => String(e.id));
-      let keepNodes = new Set(allNodeIds),
-        keepEdges = new Set(allEdgeIds);
+      // always start from an unhidden graph
+      const base = stripHidden(prev);
+      const nodes = base.nodes;
+      const edges = base.edges;
+
+      const allNodeIds = nodes.map((n) => String(n.id));
+      const allEdgeIds = edges.map((e) => String(e.id));
+
+      let keepNodes = new Set(allNodeIds);
+      let keepEdges = new Set(allEdgeIds);
+
       const intersect = (a, b) => new Set([...a].filter((x) => b.has(x)));
 
       filtersList.forEach((f) => {
         if (f.kind === 'filterNodePropEq') {
-          const { key, value } = f.payload;
-          const vl = String(value).toLowerCase();
+          const { key, value, values } = f.payload || {};
+          const allowed = (values && values.length ? values : [value]).map(norm);
+
           const matchNodes = new Set(
-            prev.nodes
-              .filter((n) => String(n[key] ?? '').toLowerCase() === vl)
-              .map((n) => n.id),
+            nodes.filter((n) => allowed.includes(norm(n[key]))).map((n) => String(n.id)),
           );
+
           const incidentEdges = new Set(
-            prev.edges
-              .filter((e) => matchNodes.has(e.from) || matchNodes.has(e.to))
+            edges
+              .filter(
+                (e) => matchNodes.has(String(e.from)) || matchNodes.has(String(e.to)),
+              )
               .map((e) => String(e.id)),
           );
+
           const neighborhood = new Set([...matchNodes]);
-          prev.edges.forEach((e) => {
-            if (incidentEdges.has(String(e.id))) {
-              neighborhood.add(e.from);
-              neighborhood.add(e.to);
+          edges.forEach((e) => {
+            const idStr = String(e.id);
+            if (incidentEdges.has(idStr)) {
+              neighborhood.add(String(e.from));
+              neighborhood.add(String(e.to));
             }
           });
+
           keepNodes = intersect(keepNodes, neighborhood);
           keepEdges = intersect(keepEdges, incidentEdges);
         } else if (f.kind === 'filterEdgePropEq') {
-          const { key, value } = f.payload;
-          const vl = String(value).toLowerCase();
+          const { key, value, values } = f.payload || {};
+          const allowed = (values && values.length ? values : [value]).map(norm);
+
           const matchEdges = new Set(
-            prev.edges
-              .filter((e) => String(e[key] ?? '').toLowerCase() === vl)
-              .map((e) => String(e.id)),
+            edges.filter((e) => allowed.includes(norm(e[key]))).map((e) => String(e.id)),
           );
+
           const endNodes = new Set();
-          prev.edges.forEach((e) => {
-            if (matchEdges.has(String(e.id))) {
-              endNodes.add(e.from);
-              endNodes.add(e.to);
+          edges.forEach((e) => {
+            const idStr = String(e.id);
+            if (matchEdges.has(idStr)) {
+              endNodes.add(String(e.from));
+              endNodes.add(String(e.to));
             }
           });
+
           keepEdges = intersect(keepEdges, matchEdges);
           keepNodes = intersect(keepNodes, endNodes);
         }
       });
 
-      if (!filtersList.length) return stripHidden(prev);
+      if (!filtersList.length) return stripHidden(base);
 
       return {
-        nodes: prev.nodes.map((n) => ({ ...n, hidden: !keepNodes.has(n.id) })),
-        edges: prev.edges.map((e) => ({
+        nodes: nodes.map((n) => ({
+          ...n,
+          hidden: !keepNodes.has(String(n.id)),
+        })),
+        edges: edges.map((e) => ({
           ...e,
           hidden:
             !keepEdges.has(String(e.id)) ||
-            !keepNodes.has(e.from) ||
-            !keepNodes.has(e.to),
+            !keepNodes.has(String(e.from)) ||
+            !keepNodes.has(String(e.to)),
         })),
       };
     });
+
+    // We'll re-enable layout in the filters effect after doing a cheap fit
   }, []);
 
   useEffect(() => {
+    // No filters → unhide everything
     if (!filters.length) {
-      // when filters cleared, unhide everything
       setGraphData((prev) => stripHidden(prev));
-      setTimeout(() => network?.fit({ animation: { duration: 300 } }), 0);
+      setTimeout(() => {
+        network?.fit({ animation: { duration: 300 } });
+        // OK to let layouts run again afterwards
+        suspendLayoutRef.current = false;
+      }, 0);
       return;
     }
+
+    // Apply filters (this sets suspendLayoutRef.current = true)
     applyActiveFilters(filters);
-    setTimeout(() => network?.fit({ animation: { duration: 300 } }), 0);
+
+    setTimeout(() => {
+      network?.fit({ animation: { duration: 300 } });
+      // Still keep layout suspended while filtered,
+      // so that every little change doesn't re-run physics.
+    }, 0);
   }, [filters, applyActiveFilters, network]);
 
-  // ---------------- RDF EXPORT HELPERS ----------------
+  // RDF export helpers
   const BASE_IRI = 'http://example.org/';
   const slug = (s = '') =>
     String(s)
@@ -407,14 +621,12 @@ export default function Graph() {
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '_')
       .replace(/^_+|_+$/g, '') || 'relatedTo';
-
   const nodeToTerm = (n) => {
     if (!n) return null;
     if (n.iri) return namedNode(n.iri);
     if (n.bnode) return blankNode(n.bnode);
     return namedNode(`${BASE_IRI}node/${n.id}`);
   };
-
   const literalFromNode = (n) => {
     if (!n) return null;
     const val = n.value ?? n.label ?? n.name ?? String(n.id);
@@ -422,10 +634,12 @@ export default function Graph() {
     if (n.datatype) return literal(val, namedNode(n.datatype));
     return literal(val);
   };
-
   const onDownloadTTL = async () => {
     try {
-      const ttl = await serializeGraphToRDF(graphData, {
+      // respect current view + filters
+      const visible = stripHidden(graphData);
+
+      const ttl = await serializeGraphToRDF(visible, {
         slug,
         nodeToTerm,
         literalFromNode,
@@ -437,7 +651,7 @@ export default function Graph() {
       a.download = 'graph.ttl';
       a.click();
       URL.revokeObjectURL(url);
-      notify('Exported graph.ttl', 'success');
+      notify('Exported graph.ttl (current view only)', 'success');
     } catch {
       notify('TTL export failed', 'error');
     }
@@ -445,8 +659,11 @@ export default function Graph() {
 
   const onDownloadNT = async () => {
     try {
+      // respect current view + filters
+      const visible = stripHidden(graphData);
+
       const nt = await serializeGraphToRDF(
-        graphData,
+        visible,
         { slug, nodeToTerm, literalFromNode },
         'nt',
       );
@@ -457,17 +674,31 @@ export default function Graph() {
       a.download = 'graph.nt';
       a.click();
       URL.revokeObjectURL(url);
-      notify('Exported graph.nt', 'success');
+      notify('Exported graph.nt (current view only)', 'success');
     } catch {
       notify('N-Triples export failed', 'error');
     }
   };
 
-  // --- JSON import (worker + batching) ---
+  // Import handlers
   const onImportJSON = makeJsonImportHandler({
     network,
     notify,
-    setGraphData,
+    setGraphData: (g) => {
+      console.debug('[IMPORT][JSON] graph set', g);
+      fullGraphRef.current = g;
+      setGraphData(g);
+      setSparqlActive(false);
+      setViews([]);
+      setActiveViewId('main');
+      setFilters([]);
+
+      // 🔹 After import: run current layout (usually 'force')
+      requestAnimationFrame(() => {
+        if (!network) return;
+        applyLayout(layoutMode);
+      });
+    },
     setFilters,
     stripHidden,
     BATCH_SIZE_NODES,
@@ -476,11 +707,23 @@ export default function Graph() {
     skipVisSyncRef,
   });
 
-  // --- RDF import (worker + batching) ---
   const onImportRDF = makeRdfImportHandler({
     network,
     notify,
-    setGraphData,
+    setGraphData: (g) => {
+      console.debug('[IMPORT][RDF] graph set', g);
+      fullGraphRef.current = g;
+      setGraphData(g);
+      setSparqlActive(false);
+      setViews([]);
+      setActiveViewId('main');
+      setFilters([]);
+
+      requestAnimationFrame(() => {
+        if (!network) return;
+        applyLayout(layoutMode);
+      });
+    },
     setFilters,
     stripHidden,
     BATCH_SIZE_NODES,
@@ -490,15 +733,24 @@ export default function Graph() {
     skipVisSyncRef,
   });
 
-  // selection helpers
-  const selectNodesAndEdges = (nodeIds, edgeIds = []) => {
-    if (!network) return;
-    network.unselectAll();
-    network.selectNodes(nodeIds.map(String), false);
-    if (edgeIds.length) network.selectEdges(edgeIds.map(String));
-    if (nodeIds.length)
-      network.focus(String(nodeIds[0]), { scale: 1, animation: { duration: 300 } });
-  };
+  // Selection helpers
+
+  const selectNodesAndEdges = useCallback(
+    (nodeIds, edgeIds = [], { focus = true } = {}) => {
+      if (!network) return;
+
+      const nodesStr = nodeIds.map(String);
+      const edgesStr = edgeIds.map(String);
+
+      network.setSelection({ nodes: nodesStr, edges: edgesStr }, { unselectAll: true });
+
+      if (focus && nodesStr.length) {
+        network.focus(nodesStr[0], { scale: 1, animation: { duration: 300 } });
+      }
+    },
+    [network],
+  );
+
   const showPanelForNode = (id) => {
     const node = graphData.nodes.find((n) => String(n.id) === String(id));
     if (!node) return;
@@ -512,39 +764,316 @@ export default function Graph() {
     setTimeout(() => setPopupNearEdge(edge), 0);
   };
 
-  // callbacks given to SearchBar
-  const onHighlightNode = (nOrId) => {
-    const id = typeof nOrId === 'object' ? nOrId.id : nOrId;
-    selectNodesAndEdges([id]);
-    showPanelForNode(id);
-  };
-  const onHighlightEdge = (e) => {
-    const id = typeof e === 'object' ? e.id : e;
-    const ed = graphData.edges.find((x) => String(x.id) === String(id));
-    if (!ed) return;
-    selectNodesAndEdges([ed.from, ed.to], [ed.id]);
-    showPanelForEdge(ed.id);
-  };
+  // Shift + drag box selection (like desktop)
+  useEffect(() => {
+    const container = networkRef.current;
+    if (!container || !network) return;
 
-  // add popover helpers
-  const openAddNodePopoverNearTop = () => {
-    const el = networkRef.current;
-    const x = el ? Math.round(el.clientWidth / 2) : 40;
-    const y = 24;
-    setQuickAdd({ x, y });
-  };
+    const onMouseDown = (e) => {
+      // Left button + Shift = start marquee
+      if (e.button !== 0 || !e.shiftKey) return;
 
-  const openEdgeFormFromMenu = () => {
-    let from = '';
-    let to = '';
-    const sel = network?.getSelectedNodes?.() || [];
-    if (sel.length >= 1) from = String(sel[0]);
-    if (sel.length >= 2) to = String(sel[1]);
-    setEdgeFormDefaults({ from, to, label: '' });
-    setEdgeFormOpen(true);
-  };
+      marqueeAdditiveRef.current = e.ctrlKey || e.metaKey;
 
-  // mutation callbacks used by PropertyPanel
+      const rect = container.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      // Don't start marquee if clicking directly on a node
+      const nodeId = network.getNodeAt({ x, y });
+      if (nodeId != null) return;
+
+      isMarqueeActiveRef.current = true;
+      marqueeStartRef.current = { x, y };
+      setMarqueeBox({ left: x, top: y, width: 0, height: 0 });
+
+      // Avoid panning while dragging the marquee
+      e.preventDefault();
+    };
+
+    const onMouseMove = (e) => {
+      if (!isMarqueeActiveRef.current) return;
+
+      const rect = container.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const start = marqueeStartRef.current;
+      if (!start) return;
+
+      const left = Math.min(x, start.x);
+      const top = Math.min(y, start.y);
+      const width = Math.abs(x - start.x);
+      const height = Math.abs(y - start.y);
+
+      setMarqueeBox({ left, top, width, height });
+    };
+
+    const finishSelection = () => {
+      if (!isMarqueeActiveRef.current) return;
+      isMarqueeActiveRef.current = false;
+
+      setMarqueeBox((box) => {
+        if (!box) return null;
+        const { left, top, width, height } = box;
+        const x1 = left;
+        const y1 = top;
+        const x2 = left + width;
+        const y2 = top + height;
+
+        if (!graphData.nodes.length) return null;
+
+        // Get positions for all nodes (vis uses string ids)
+        // Only consider visible nodes (avoids selecting hidden stuff)
+        const visibleNodes = graphData.nodes.filter((n) => !n.hidden);
+
+        // Positions for visible nodes only
+        const idStrings = visibleNodes.map((n) => String(n.id));
+        const positions = network.getPositions(idStrings);
+
+        const selectedNodeIds = [];
+
+        visibleNodes.forEach((n) => {
+          const idStr = String(n.id);
+          const pos = positions[idStr];
+          if (!pos) return;
+          const dom = network.canvasToDOM(pos);
+
+          if (dom.x >= x1 && dom.x <= x2 && dom.y >= y1 && dom.y <= y2) {
+            selectedNodeIds.push(String(n.id)); // store as string
+          }
+        });
+
+        if (selectedNodeIds.length) {
+          const boxedNodes = selectedNodeIds; // already strings
+
+          // Union with existing selection when Ctrl/Cmd was held at drag start
+          const nextNodesSet = marqueeAdditiveRef.current
+            ? new Set([...selRef.current.nodes, ...boxedNodes])
+            : new Set(boxedNodes);
+
+          // Visible edges only (endpoints must be visible)
+          const visibleNodeIds = new Set(visibleNodes.map((n) => String(n.id)));
+          const edgesInView = graphData.edges.filter((e) => {
+            if (e.hidden) return false;
+            return visibleNodeIds.has(String(e.from)) && visibleNodeIds.has(String(e.to));
+          });
+
+          // Edges whose endpoints are BOTH in nextNodesSet
+          const boxedEdges = edgesInView
+            .filter(
+              (e) => nextNodesSet.has(String(e.from)) && nextNodesSet.has(String(e.to)),
+            )
+            .map((e) => String(e.id));
+
+          // If additive, preserve any previously selected edges too
+          const nextEdgesSet = marqueeAdditiveRef.current
+            ? new Set([...selRef.current.edges, ...boxedEdges])
+            : new Set(boxedEdges);
+
+          selRef.current.nodes = nextNodesSet;
+          selRef.current.edges = nextEdgesSet;
+
+          network.setSelection(
+            { nodes: Array.from(nextNodesSet), edges: Array.from(nextEdgesSet) },
+            { unselectAll: true },
+          );
+
+          if (!marqueeAdditiveRef.current) {
+            const first = Array.from(nextNodesSet)[0];
+            if (first) network.focus(first, { scale: 1, animation: { duration: 300 } });
+          }
+
+          suppressNextClickRef.current = true;
+          notify(`Selected ${nextNodesSet.size} node(s) via box`, 'info');
+        } else {
+          marqueeSelectionRef.current = [];
+        }
+
+        return null; // clear marquee box
+      });
+    };
+
+    const onMouseUp = () => {
+      finishSelection();
+    };
+
+    const onMouseLeave = () => {
+      finishSelection();
+    };
+
+    container.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    container.addEventListener('mouseleave', onMouseLeave);
+
+    return () => {
+      container.removeEventListener('mousedown', onMouseDown);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      container.removeEventListener('mouseleave', onMouseLeave);
+    };
+  }, [networkRef, network, graphData, selectNodesAndEdges, notify]);
+
+  // SPARQL hard-replace apply/clear
+  const applySparqlSubgraph = useCallback(
+    (sub) => {
+      console.debug('[SPARQL] apply subgraph', sub);
+      if (network) {
+        try {
+          skipVisSyncRef.current = true;
+          network.setData({ nodes: [], edges: [] }); // clear canvas completely
+          network.setData({
+            nodes: sub.nodes.map(toVisNode),
+            edges: sub.edges.map(toVisEdge),
+          });
+        } finally {
+          skipVisSyncRef.current = false;
+        }
+      }
+      setGraphData(sub); // React state = subgraph (no merging)
+      setSparqlActive(true);
+      setTimeout(() => network?.fit({ animation: { duration: 300 } }), 0);
+    },
+    [network],
+  );
+
+  const hardReplaceVisGraph = useCallback(
+    (g) => {
+      if (!network) return;
+
+      selRef.current.nodes = new Set();
+      selRef.current.edges = new Set();
+      network.unselectAll();
+
+      // Sanitize: drop edges whose endpoints aren't present
+      const nodeIds = new Set((g.nodes || []).map((n) => String(n.id)));
+      const safeEdges = (g.edges || []).filter(
+        (e) => nodeIds.has(String(e.from)) && nodeIds.has(String(e.to)),
+      );
+
+      // 🔥 IMPORTANT: reset positions so vis doesn't reuse old cached coords
+      const resetNodes = (g.nodes || []).map((n) => {
+        const nn = { ...n };
+        // give a small clustered starting layout
+        nn.x = (Math.random() - 0.5) * 200;
+        nn.y = (Math.random() - 0.5) * 200;
+        nn.fixed = false;
+        nn.physics = true;
+        return nn;
+      });
+
+      const safeGraph = { nodes: resetNodes, edges: safeEdges };
+
+      skipVisSyncRef.current = true;
+      try {
+        network.setData({ nodes: [], edges: [] });
+        network.setData({
+          nodes: safeGraph.nodes.map(toVisNodeStable),
+          edges: safeGraph.edges.map(toVisEdge),
+        });
+      } finally {
+        skipVisSyncRef.current = false;
+      }
+
+      // Apply layout + fit AFTER stabilize (prevents zooming to some far cached box)
+      requestAnimationFrame(() => {
+        if (!network) return;
+
+        // ensure physics/layout options are set
+        applyLayout(layoutMode);
+
+        const doFit = () => {
+          if (!network) return;
+
+          if (safeGraph.nodes.length === 1) {
+            network.focus(String(safeGraph.nodes[0].id), {
+              scale: 1.6,
+              animation: { duration: 300 },
+            });
+          } else {
+            network.fit({ animation: { duration: 300 } });
+          }
+        };
+
+        // run a quick stabilization then fit
+        network.once('stabilized', doFit);
+        network.stabilize(50);
+
+        // fallback in case stabilized doesn't fire for some reason
+        setTimeout(doFit, 120);
+      });
+    },
+    [network, toVisNodeStable, applyLayout, layoutMode],
+  );
+
+  const applyFocusSubgraph = useCallback(
+    (sub) => {
+      console.debug('[FOCUS] apply subgraph', sub);
+      hardReplaceVisGraph(sub);
+      setGraphData(sub);
+    },
+    [hardReplaceVisGraph],
+  );
+
+  const clearSparqlView = useCallback(() => {
+    if (!sparqlActive) return;
+    const baseline = fullGraphRef.current || graphData;
+    console.debug('[SPARQL] clear → baseline', baseline);
+    if (network) {
+      try {
+        skipVisSyncRef.current = true;
+        network.setData({ nodes: [], edges: [] });
+        network.setData({
+          nodes: baseline.nodes.map(toVisNode),
+          edges: baseline.edges.map(toVisEdge),
+        });
+      } finally {
+        skipVisSyncRef.current = false;
+      }
+    }
+    setGraphData(baseline);
+    setSparqlActive(false);
+    setTimeout(() => network?.fit({ animation: { duration: 300 } }), 0);
+    notify('SPARQL view cleared', 'info');
+  }, [sparqlActive, graphData, network, notify]);
+
+  const onRunSparql = useCallback(
+    async (query) => {
+      try {
+        console.debug('[SPARQL] run:\n', query);
+
+        // Capture baseline the first time we enter SPARQL mode
+        if (!sparqlActive && !fullGraphRef.current) {
+          fullGraphRef.current = graphData;
+          console.debug('[SPARQL] baseline captured');
+        }
+
+        // Reset ID caches so the same terms always map to the same node ids
+        resetSparqlIdCache();
+
+        // Execute and transform strictly to a subgraph (NO merging)
+        const { vars, rows } = await runSparqlSelect(graphData, query);
+        console.debug('[SPARQL] vars:', vars, 'rows:', rows?.length ?? 0, rows);
+
+        const sub = rowsToGraph({ vars, rows }); // rows-only → nodes/edges
+        console.debug('[SPARQL] subgraph:', sub);
+
+        applySparqlSubgraph(sub);
+        notify(
+          `SPARQL matched ${sub.nodes.length} nodes, ${sub.edges.length} edges`,
+          'success',
+          2500,
+        );
+        setSparqlOpen(false);
+      } catch (err) {
+        console.error('[SPARQL] error', err);
+        notify('SPARQL failed: ' + (err?.message || String(err)), 'error', 4000);
+      }
+    },
+    [graphData, sparqlActive, applySparqlSubgraph, notify],
+  );
+
+  // Mutations (panel)
   const updateNode = (data, setErr, done) => {
     const newId = Number(data.id);
     if (!Number.isInteger(newId)) {
@@ -626,76 +1155,669 @@ export default function Graph() {
     setSelected(null);
   };
 
-  // run example from help modal (placeholder; wire SPARQL later if you want)
-  const runString = (_cmd) => {};
+  // ---- View merge helpers ----
+  const mergeGraphs = (graphs) => {
+    // graphs: [{nodes, edges}, ...]
+    const nodeMap = new Map(); // key: String(id) -> node
+    const edgeMap = new Map(); // key: String(id) -> edge
+    const usedEdgeIds = new Set();
 
-  // fit
+    // Merge nodes (shallow merge; later graphs win for extra props, but keep id)
+    const upsertNode = (n) => {
+      const key = String(n.id);
+      const prev = nodeMap.get(key);
+      if (!prev) nodeMap.set(key, n);
+      else nodeMap.set(key, { ...prev, ...n, id: prev.id }); // keep original id type
+    };
+
+    // Add edge, resolving id collisions
+    const addEdge = (e) => {
+      const idKey = String(e.id);
+      if (!usedEdgeIds.has(idKey) && !edgeMap.has(idKey)) {
+        edgeMap.set(idKey, e);
+        usedEdgeIds.add(idKey);
+        return;
+      }
+
+      // If same id but identical edge, skip
+      const existing = edgeMap.get(idKey);
+      if (
+        existing &&
+        String(existing.from) === String(e.from) &&
+        String(existing.to) === String(e.to) &&
+        String(existing.label ?? '') === String(e.label ?? '')
+      ) {
+        return;
+      }
+
+      // Otherwise create a new id
+      let newId = `${idKey}_m`;
+      while (usedEdgeIds.has(newId)) {
+        newId = `e_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      }
+      const fixed = { ...e, id: newId };
+
+      edgeMap.set(String(fixed.id), fixed);
+      usedEdgeIds.add(String(fixed.id));
+    };
+
+    // First pass: nodes + edges
+    graphs.forEach((g) => {
+      (g?.nodes || []).forEach(upsertNode);
+      (g?.edges || []).forEach((e) => {
+        // Ensure endpoints exist: if an edge references missing nodes, we’ll add placeholders
+        const f = String(e.from);
+        const t = String(e.to);
+        if (!nodeMap.has(f))
+          nodeMap.set(f, { id: isNaN(Number(f)) ? f : Number(f), label: f, name: f });
+        if (!nodeMap.has(t))
+          nodeMap.set(t, { id: isNaN(Number(t)) ? t : Number(t), label: t, name: t });
+
+        addEdge(e);
+      });
+    });
+
+    // Second pass: drop edges whose endpoints still aren’t present (paranoia)
+    const finalNodes = Array.from(nodeMap.values());
+    const finalNodeIds = new Set(finalNodes.map((n) => String(n.id)));
+
+    const finalEdges = Array.from(edgeMap.values()).filter(
+      (e) => finalNodeIds.has(String(e.from)) && finalNodeIds.has(String(e.to)),
+    );
+
+    // Strip layout fields so vis doesn’t reuse old coords
+    const stripLayout = (n) => {
+      const nn = { ...n };
+      delete nn.x;
+      delete nn.y;
+      delete nn.vx;
+      delete nn.vy;
+      delete nn.fixed;
+      delete nn.physics;
+      return nn;
+    };
+
+    return { nodes: finalNodes.map(stripLayout), edges: finalEdges };
+  };
+
+  const getGraphForViewId = useCallback(
+    (id) => {
+      if (id === 'main') return stripHidden(fullGraphRef.current || graphData);
+      const v = views.find((x) => x.id === id);
+      if (!v) return null;
+      return stripHidden(v.graph || v);
+    },
+    [views, graphData],
+  );
+
+  const mergeSelectedViews = useCallback(
+    (ids) => {
+      const uniq = Array.from(new Set((ids || []).map(String)));
+
+      if (uniq.length < 2) {
+        notify(
+          'Select at least two views (Ctrl/Cmd-click view chips), then merge.',
+          'info',
+          2800,
+        );
+        return;
+      }
+
+      const graphs = uniq.map((id) => getGraphForViewId(id)).filter(Boolean);
+
+      if (graphs.length < 2) {
+        notify('Could not find at least two valid selected views to merge', 'error');
+        return;
+      }
+
+      const merged = mergeGraphs(graphs);
+
+      const viewId = `merge_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const label = `Merged ${views.length + 1}`;
+
+      setViews((prev) => [...prev, { id: viewId, label, graph: merged }]);
+      setActiveViewId(viewId);
+      applyFocusSubgraph(merged);
+
+      notify(`Merged ${graphs.length} selected views into "${label}"`, 'success');
+    },
+    [views.length, applyFocusSubgraph, notify, getGraphForViewId],
+  );
+
+  const runString = (raw) => {
+    if (!raw) return;
+    const cmd = raw.trim();
+    if (!cmd) return;
+
+    // ── VIEW COMMANDS ───────────────────────────────────────────
+    // view copy
+    // view paste
+    // view merge <id1> <id2> ...   (ids can include "main")
+    if (/^view\b/i.test(cmd)) {
+      const parts = cmd.split(/\s+/).filter(Boolean);
+      const sub = (parts[1] || '').toLowerCase();
+
+      if (sub === 'copy') {
+        const visible = stripHidden(graphData); // current view only
+        navigator.clipboard
+          .writeText(
+            JSON.stringify({ nodes: visible.nodes, edges: visible.edges }, null, 2),
+          )
+          .then(() => notify('Copied current view to clipboard', 'success'))
+          .catch(() => notify('Copy failed', 'error'));
+        return;
+      }
+
+      if (sub === 'paste') {
+        navigator.clipboard
+          .readText()
+          .then((txt) => {
+            const parsed = JSON.parse(txt);
+            const incoming = {
+              nodes: parsed.nodes || parsed.links || [],
+              edges: parsed.edges || parsed.links || [],
+            };
+
+            const current = stripHidden(graphData);
+            const merged = mergeGraphs([current, incoming]);
+
+            const viewId = `merge_${Date.now()}_${Math.random()
+              .toString(36)
+              .slice(2, 6)}`;
+            const label = `Merged ${views.length + 1}`;
+
+            setViews((prev) => [...prev, { id: viewId, label, graph: merged }]);
+            setActiveViewId(viewId);
+            applyFocusSubgraph(merged);
+
+            notify(`Pasted + merged into "${label}"`, 'success');
+          })
+          .catch((e) => notify(`Paste failed: ${e?.message || e}`, 'error'));
+        return;
+      }
+
+      notify('View commands: view copy | view paste', 'info', 3000);
+      return;
+    }
+
+    // ── FILTER CLEAR ──────────────────────────────────────────
+    if (/^filter\s+clear$/i.test(cmd)) {
+      clearAllFilters();
+      notify('All filters cleared', 'info');
+      return;
+    }
+
+    // ── FILTER COMMANDS (supports union with "|") ─────────────
+    if (/^filter\b/i.test(cmd)) {
+      const rest = cmd.slice(6).trim(); // after "filter"
+      if (!rest) {
+        notify('Filter syntax: filter node:key=value · filter edge:key=value', 'error');
+        return;
+      }
+
+      let target = 'node'; // default
+      let expr = rest;
+
+      if (rest.startsWith('node:')) {
+        target = 'node';
+        expr = rest.slice('node:'.length);
+      } else if (rest.startsWith('edge:')) {
+        target = 'edge';
+        expr = rest.slice('edge:'.length);
+      }
+
+      const eqIdx = expr.indexOf('=');
+      if (eqIdx === -1) {
+        notify('Filter must be of form key=value', 'error');
+        return;
+      }
+
+      const key = expr.slice(0, eqIdx).trim();
+      const rawValue = expr.slice(eqIdx + 1).trim();
+
+      if (!key || !rawValue) {
+        notify('Filter must include both key and value', 'error');
+        return;
+      }
+
+      // Split on "|" for union, e.g. CAUSES|RELATES_TO
+      const parts = rawValue
+        .split('|')
+        .map((v) => v.trim())
+        .filter(Boolean);
+
+      const payload =
+        parts.length > 1
+          ? { key, values: parts } // union
+          : { key, value: parts[0] }; // single value
+
+      const prettyVals = parts.join(' | ');
+
+      if (target === 'node') {
+        addFilter({
+          kind: 'filterNodePropEq',
+          payload,
+        });
+        notify(`Added node filter: ${key}=${prettyVals}`, 'success');
+      } else {
+        addFilter({
+          kind: 'filterEdgePropEq',
+          payload,
+        });
+        notify(`Added edge filter: ${key}=${prettyVals}`, 'success');
+      }
+
+      // IMPORTANT: no pre-matching / blocking anymore.
+      // applyActiveFilters() will actually do the filtering.
+      return;
+    }
+
+    // ── SEARCH COMMANDS ───────────────────────────────────────
+    // Supports:
+    //   node.key=value
+    //   edge.key=value
+    //   key=value
+    //   plainText (matches label/name/id)
+    let searchTarget = 'auto'; // 'node' | 'edge' | 'auto'
+    let expr = cmd;
+
+    if (cmd.startsWith('node.')) {
+      searchTarget = 'node';
+      expr = cmd.slice('node.'.length);
+    } else if (cmd.startsWith('edge.')) {
+      searchTarget = 'edge';
+      expr = cmd.slice('edge.'.length);
+    }
+
+    let propKey = null;
+    let propValue = null;
+    const eqIdx = expr.indexOf('=');
+
+    if (eqIdx !== -1) {
+      propKey = expr.slice(0, eqIdx).trim();
+      propValue = expr.slice(eqIdx + 1).trim();
+    } else {
+      propValue = expr.trim();
+    }
+
+    const q = (propValue || '').toLowerCase();
+    if (!q) {
+      notify('Empty search query', 'error');
+      return;
+    }
+
+    const matchBy = (obj, defaultKeys) => {
+      if (propKey) {
+        const v = obj[propKey];
+        return v != null && String(v).toLowerCase().includes(q);
+      }
+      for (const k of defaultKeys) {
+        const v = obj[k];
+        if (v != null && String(v).toLowerCase().includes(q)) return true;
+      }
+      return false;
+    };
+
+    const results = { nodes: [], edges: [] };
+
+    // Try nodes first (unless explicitly edge)
+    if (searchTarget === 'node' || searchTarget === 'auto') {
+      const ns = graphData.nodes.filter((n) => matchBy(n, ['label', 'name', 'id']));
+      if (ns.length) results.nodes = ns;
+    }
+
+    // Edges (explicit or fallback when no node matches)
+    if (searchTarget === 'edge' || (searchTarget === 'auto' && !results.nodes.length)) {
+      const es = graphData.edges.filter((e) => matchBy(e, ['label', 'id']));
+      if (es.length) results.edges = es;
+    }
+
+    if (!results.nodes.length && !results.edges.length) {
+      notify('No matches found', 'info');
+      network?.unselectAll();
+      return;
+    }
+
+    // Collect node + edge ids
+    let nodeIds = results.nodes.map((n) => n.id);
+    let edgeIds = results.edges.map((e) => e.id);
+
+    // If we have edge matches, make sure we also include their endpoints
+    if (results.edges.length) {
+      const extra = new Set(nodeIds);
+      results.edges.forEach((e) => {
+        extra.add(e.from);
+        extra.add(e.to);
+      });
+      nodeIds = Array.from(extra);
+    } else if (!results.edges.length && nodeIds.length) {
+      // No direct edge matches, but some node matches:
+      // include their incident edges to give context
+      const incEdges = graphData.edges.filter(
+        (e) => nodeIds.includes(e.from) || nodeIds.includes(e.to),
+      );
+      edgeIds = incEdges.map((e) => e.id);
+    }
+
+    selectNodesAndEdges(nodeIds, edgeIds);
+
+    // Open panel when exactly one thing matched
+    if (results.nodes.length === 1 && !results.edges.length) {
+      showPanelForNode(results.nodes[0].id);
+    } else if (results.edges.length === 1 && !results.nodes.length) {
+      showPanelForEdge(results.edges[0].id);
+    }
+
+    notify(
+      `Matched ${results.nodes.length} node(s), ${results.edges.length} edge(s)`,
+      'info',
+    );
+  };
+
+  const focusOnSelection = useCallback(() => {
+    if (!network) return;
+
+    // Always start from what is *currently visible* (after filters)
+    const visible = getVisibleSubgraph();
+    const { nodes, edges } = visible;
+
+    if (!nodes.length) {
+      notify('Nothing to focus on', 'info');
+      return;
+    }
+
+    // ─────────────────────────────────────────────
+    // CASE A: Filters are active → freeze current filtered graph as a view
+    // (e.g. after "filter edge:label=1", this is EXACTLY what you see)
+    // ─────────────────────────────────────────────
+    if (filters.length) {
+      const sub = visible; // ONLY currently visible stuff
+
+      const viewId = `focus_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const label = `View ${views.length + 1}`;
+
+      setViews((prev) => [...prev, { id: viewId, label, graph: sub }]);
+      setActiveViewId(viewId);
+
+      // clear filters so they don't re-apply on top of the frozen view
+      setFilters([]);
+
+      applyFocusSubgraph(sub);
+      notify(`Saved filtered result as "${label}"`, 'success');
+      return;
+    }
+
+    // ─────────────────────────────────────────────
+    // CASE B: No filters → focus around explicit selection
+    // ─────────────────────────────────────────────
+    const selectedIds = selRef.current.nodes.size
+      ? Array.from(selRef.current.nodes)
+      : (network.getSelectedNodes?.() || []).map(String);
+
+    console.debug('[FOCUS] selectedIds from vis:', selectedIds);
+
+    if (!selectedIds.length) {
+      notify('Select at least one node first', 'info');
+      return;
+    }
+
+    const seed = new Set(selectedIds);
+    const keepNodes = new Set(seed);
+
+    if (includeNeighbors) {
+      // include immediate neighbors of selected nodes
+      edges.forEach((e) => {
+        const from = String(e.from);
+        const to = String(e.to);
+        if (seed.has(from) || seed.has(to)) {
+          keepNodes.add(from);
+          keepNodes.add(to);
+        }
+      });
+    }
+
+    // keep edges only if both endpoints are kept
+    const keepEdges = new Set();
+    edges.forEach((e) => {
+      const from = String(e.from);
+      const to = String(e.to);
+      if (keepNodes.has(from) && keepNodes.has(to)) {
+        keepEdges.add(String(e.id));
+      }
+    });
+
+    const sub = {
+      nodes: nodes.filter((n) => keepNodes.has(String(n.id))),
+      edges: edges.filter((e) => keepEdges.has(String(e.id))),
+    };
+
+    const stripLayoutFields = (n) => {
+      const nn = { ...n };
+      delete nn.x;
+      delete nn.y;
+      delete nn.vx;
+      delete nn.vy;
+      delete nn.fixed;
+      delete nn.physics;
+      return nn;
+    };
+
+    const subClean = {
+      nodes: sub.nodes.map(stripLayoutFields),
+      edges: sub.edges,
+    };
+
+    console.debug(
+      '[FOCUS][selection] subgraph nodes=',
+      sub.nodes.length,
+      'edges=',
+      sub.edges.length,
+    );
+
+    if (!sub.nodes.length) {
+      notify('Focus selection resulted in an empty subgraph', 'info');
+      return;
+    }
+
+    const viewId = `focus_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const label = `View ${views.length + 1}`;
+
+    setViews((prev) => [...prev, { id: viewId, label, graph: subClean }]);
+    setActiveViewId(viewId);
+
+    suspendLayoutRef.current = false;
+    applyFocusSubgraph(subClean);
+    notify(`Focused on selection as "${label}"`, 'success');
+    marqueeSelectionRef.current = [];
+  }, [
+    network,
+    getVisibleSubgraph,
+    filters.length,
+    includeNeighbors,
+    views.length,
+    applyFocusSubgraph,
+    notify,
+  ]);
+
+  const activateView = useCallback(
+    (id) => {
+      const applyViewGraph = (g, viewId) => {
+        hardReplaceVisGraph(g);
+        setGraphData(g);
+        setActiveViewId(viewId);
+      };
+
+      // Back to main
+      if (id === 'main') {
+        const baseline = stripHidden(fullGraphRef.current || graphData);
+        applyViewGraph(baseline, 'main');
+        return;
+      }
+
+      // Saved view
+      const view = views.find((v) => v.id === id);
+      if (!view) return;
+
+      const g = stripHidden(view.graph || view);
+      applyViewGraph(g, id);
+    },
+    [views, hardReplaceVisGraph, graphData],
+  );
+
+  const removeView = useCallback(
+    (id) => {
+      setViews((prev) => prev.filter((v) => v.id !== id));
+      if (activeViewId === id) {
+        activateView('main');
+      }
+    },
+    [activeViewId, activateView],
+  );
+
+  const clearFocus = useCallback(() => {
+    activateView('main');
+    notify('Focus cleared', 'info');
+  }, [activateView, notify]);
+
   const fitToScreen = () =>
     network?.fit({ animation: { duration: 300, easingFunction: 'easeInOutQuad' } });
 
   return (
-    <div
-      style={{
-        position: 'relative',
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100dvh',
-        overflow: 'hidden',
-      }}
-    >
-      <Toolbar
-        graphData={graphData}
-        filters={filters}
-        onAddFilter={addFilter}
-        onRemoveFilter={removeFilter}
-        onClearFilters={clearAllFilters}
-        onAddNodeClick={openAddNodePopoverNearTop}
-        onAddEdgeClick={openEdgeFormFromMenu}
-        onHighlightNode={onHighlightNode}
-        onHighlightEdge={onHighlightEdge}
-        onOpenHelp={() => setHelpOpen(true)}
-        onRunString={runString}
-        notify={notify}
-        onFit={fitToScreen}
-        layoutMode={layoutMode}
-        setLayoutMode={setLayoutMode}
-        onImportJSON={onImportJSON}
-        onDownloadJSON={() => {
-          const payload = { nodes: graphData.nodes, links: graphData.edges };
-          const blob = new Blob([JSON.stringify(payload, null, 2)], {
-            type: 'application/json',
-          });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = 'graph.json';
-          a.click();
-          URL.revokeObjectURL(url);
-          notify('Downloaded graph.json', 'success');
-        }}
-        onCopyJSON={() => {
-          const payload = { nodes: graphData.nodes, links: graphData.edges };
-          navigator.clipboard
-            .writeText(JSON.stringify(payload, null, 2))
-            .then(() => notify('Copied JSON to clipboard', 'success'))
-            .catch(() => notify('Copy failed', 'error'));
-        }}
-        onImportRDF={onImportRDF}
-        onDownloadTTL={onDownloadTTL}
-        onDownloadNT={onDownloadNT}
-      />
+    <div className="kg-graph">
+      {/* ───── Toolbar row (Reduce + Organize) ───── */}
+      <div className="kg-graph-toolbar">
+        <Toolbar
+          graphData={graphData}
+          filters={filters}
+          onAddFilter={addFilter}
+          onRemoveFilter={removeFilter}
+          onClearFilters={clearAllFilters}
+          onAddNodeClick={() => {
+            const el = networkRef.current;
+            const x = el ? Math.round(el.clientWidth / 2) : 40;
+            const y = 24;
+            setQuickAdd({ x, y });
+          }}
+          onAddEdgeClick={() => {
+            let from = '';
+            let to = '';
+            const sel = network?.getSelectedNodes?.() || [];
+            if (sel.length >= 1) from = String(sel[0]);
+            if (sel.length >= 2) to = String(sel[1]);
+            setEdgeFormDefaults({ from, to, label: '' });
+            setEdgeFormOpen(true);
+          }}
+          onHighlightNode={(nOrId) => {
+            const id = typeof nOrId === 'object' ? nOrId.id : nOrId;
+            selectNodesAndEdges([id]);
+            showPanelForNode(id);
+          }}
+          onHighlightEdge={(e) => {
+            const id = typeof e === 'object' ? e.id : e;
+            const ed = graphData.edges.find((x) => String(x.id) === String(id));
+            if (!ed) return;
+            selectNodesAndEdges([ed.from, ed.to], [ed.id]);
+            showPanelForEdge(ed.id);
+          }}
+          onOpenHelp={() => setHelpOpen(true)}
+          onRunString={runString}
+          notify={notify}
+          onFit={fitToScreen}
+          onFocusSelection={focusOnSelection}
+          onClearFocus={clearFocus}
+          layoutMode={layoutMode}
+          setLayoutMode={setLayoutMode}
+          onImportJSON={onImportJSON}
+          onDownloadJSON={() => {
+            // current view only (respect filters + view)
+            const visible = stripHidden(graphData);
+            const payload = { nodes: visible.nodes, links: visible.edges };
 
-      <div
-        ref={networkRef}
-        style={{
-          flex: '1 1 0',
-          minHeight: 0,
-          border: '1px solid #ddd',
-          borderRadius: '8px',
-          position: 'relative',
-          cursor: edgeFrom != null ? 'crosshair' : 'default',
-        }}
-      />
+            const blob = new Blob([JSON.stringify(payload, null, 2)], {
+              type: 'application/json',
+            });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'graph.json';
+            a.click();
+            URL.revokeObjectURL(url);
+            notify('Downloaded graph.json (current view only)', 'success');
+          }}
+          onCopyJSON={() => {
+            const visible = stripHidden(graphData);
+            const payload = { nodes: visible.nodes, links: visible.edges };
+
+            navigator.clipboard
+              .writeText(JSON.stringify(payload, null, 2))
+              .then(() => notify('Copied current view JSON to clipboard', 'success'))
+              .catch(() => notify('Copy failed', 'error'));
+          }}
+          onImportRDF={onImportRDF}
+          onDownloadTTL={onDownloadTTL}
+          onDownloadNT={onDownloadNT}
+          // If/when you wire these in Toolbar:
+          // onOpenSparql={() => setSparqlOpen(true)}
+          // onClearSparql={clearSparqlView}
+          includeNeighbors={includeNeighbors}
+          setIncludeNeighbors={setIncludeNeighbors}
+          onMergeSelectedViews={mergeSelectedViews}
+          command={command}
+          setCommand={setCommand}
+          views={views}
+          activeViewId={activeViewId}
+          onActivateView={activateView}
+          onRemoveView={removeView}
+        />
+      </div>
+
+      {/* ───── Hint + canvas (viz first) ───── */}
+      <div className="kg-graph-body">
+        <div className="kg-graph-hint-row">
+          <p className="kg-graph-hint">
+            Double-click empty space: add node · Right-click node: edge mode (target node
+            creates edge, Esc cancels) · Shift+drag: box-select · Ctrl/Cmd-click:
+            multi-select
+            <br />
+            Search/filter in the bar · Focus selection saves a view (Neighbors toggle =
+            1-hop)
+          </p>
+
+          {SPARQL_ENABLED && sparqlActive && (
+            <button
+              type="button"
+              className="kg-secondary-pill"
+              onClick={clearSparqlView}
+            >
+              SPARQL view active · Clear
+            </button>
+          )}
+        </div>
+
+        <div className="kg-graph-canvas">
+          <div
+            ref={networkRef}
+            className="kg-graph-canvas-inner"
+            style={{
+              cursor: edgeFrom != null ? 'crosshair' : 'default',
+            }}
+          >
+            {marqueeBox && (
+              <div
+                className="kg-graph-marquee"
+                style={{
+                  left: marqueeBox.left,
+                  top: marqueeBox.top,
+                  width: marqueeBox.width,
+                  height: marqueeBox.height,
+                }}
+              />
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ───── Overlays / popovers / modals stay the same ───── */}
 
       <PropertyPanel
         selected={selected}
@@ -708,24 +1830,20 @@ export default function Graph() {
 
       <EdgeModeBanner active={edgeFrom != null} />
 
-      {/* ADD NODE (on-map popover) */}
+      {/* ADD NODE */}
       <QuickAddNodePopover
         pos={quickAdd}
         onCancel={() => setQuickAdd(null)}
         onAdd={(label) => {
-          // re-enable sync if a previous import turned it off
           skipVisSyncRef.current = false;
-          // Pause layout so it won't fight the camera
           suspendLayoutRef.current = true;
 
-          // robust nextId in case of non-numeric ids
           const maxId = graphData.nodes.reduce((m, n) => {
             const v = Number(n.id);
             return Number.isFinite(v) ? Math.max(m, v) : m;
           }, 0);
           const nextId = maxId + 1;
 
-          // spawn position
           let spawn = null;
           if (network && quickAdd?.x != null && quickAdd?.y != null) {
             const p = network.DOMtoCanvas({ x: quickAdd.x, y: quickAdd.y + 8 });
@@ -734,7 +1852,6 @@ export default function Graph() {
 
           const text =
             typeof label === 'string' ? label.trim() : String(label ?? '').trim();
-
           const newNode = {
             id: nextId,
             name: text || `Node ${nextId}`,
@@ -817,7 +1934,6 @@ export default function Graph() {
 
           const edgeLabel =
             typeof label === 'string' ? label.trim() : String(label ?? '').trim();
-
           const edgeId = `e_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
           const newEdge = { id: edgeId, from: f, to: t, label: edgeLabel };
           setGraphData((prev) => ({
@@ -851,7 +1967,6 @@ export default function Graph() {
           }
           const edgeLabel =
             typeof label === 'string' ? label.trim() : String(label ?? '').trim();
-
           const edgeId = `e_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
           const newEdge = { id: edgeId, from: f, to: t, label: edgeLabel };
           setGraphData((prev) => ({
@@ -867,10 +1982,20 @@ export default function Graph() {
         }}
       />
 
+      {SPARQL_ENABLED && (
+        <SparqlModal
+          open={sparqlOpen}
+          onClose={() => setSparqlOpen(false)}
+          onRun={onRunSparql}
+          onClear={clearSparqlView}
+          isFiltered={sparqlActive}
+        />
+      )}
+
       <HelpModal
         open={helpOpen}
         onClose={() => setHelpOpen(false)}
-        onRun={() => {}}
+        onInsertCommand={setCommand}
       />
 
       <Toast toast={toast} />

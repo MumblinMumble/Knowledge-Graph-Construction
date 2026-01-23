@@ -1,5 +1,7 @@
 // src/components/Graph/utils/theme.js
 export function applyVisTheme(network) {
+  const prevInteraction = network?.options?.interaction || {};
+
   network.setOptions({
     nodes: {
       shape: 'dot',
@@ -39,7 +41,12 @@ export function applyVisTheme(network) {
       },
       arrows: { to: { enabled: true, scaleFactor: 0.8 } },
     },
-    interaction: { hover: true, tooltipDelay: 100 },
+    interaction: {
+      ...prevInteraction,
+      hover: true,
+      tooltipDelay: 100,
+      multiselect: false,
+    },
     physics: { enabled: true },
   });
 }

@@ -26,7 +26,7 @@ export function makeRdfImportHandler({
     network?.setOptions({
       physics: { enabled: false },
       layout: { improvedLayout: false },
-      interaction: { hover: false, zoomSpeed: 0.8 },
+      interaction: { hover: false, zoomSpeed: 0.8, multiselect: false },
       edges: { smooth: false },
       nodes: { shadow: false },
     });
@@ -41,7 +41,10 @@ export function makeRdfImportHandler({
         notify(`RDF parse failed: ${msg.data.message}`, 'error', 4000);
         suspendLayoutRef.current = false;
         skipVisSyncRef.current = false;
-        network?.setOptions({ physics: { enabled: true }, interaction: { hover: true } });
+        network?.setOptions({
+          physics: { enabled: true },
+          interaction: { hover: true, multiselect: false },
+        });
         worker.terminate();
         return;
       }
@@ -88,7 +91,7 @@ export function makeRdfImportHandler({
               network.fit({ animation: false });
               network.setOptions({
                 physics: { enabled: true },
-                interaction: { hover: true, zoomSpeed: 0.8 },
+                interaction: { hover: true, zoomSpeed: 0.8, multiselect: false },
               });
               setGraphData({ nodes, edges });
               notify(
