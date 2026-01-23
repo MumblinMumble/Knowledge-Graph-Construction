@@ -8,6 +8,10 @@
   display: flex;
   align-items: center;
   gap: 8px;
+
+  /* ✅ allow wrapping instead of overflowing */
+  flex-wrap: wrap;
+  row-gap: 8px;
 }
 
 /* generic group */
@@ -15,6 +19,10 @@
   display: flex;
   align-items: center;
   gap: 6px;
+
+  /* ✅ allow groups to wrap internally */
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 /* group sizing */
@@ -23,11 +31,16 @@
 }
 
 .kg-tb-group-search {
-  flex: 1; /* search bar stretches */
+  /* ✅ search takes remaining space, but can wrap to its own line */
+  flex: 1 1 360px;
+  min-width: 260px;
 }
 
 .kg-tb-group-layout {
-  /* compact */
+  /* ✅ allow this group to shrink + wrap */
+  flex: 0 1 auto;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .kg-tb-group-file {
@@ -39,6 +52,14 @@
   width: 1px;
   height: 28px;
   background: #e5e7eb;
+  margin: 2px 0; /* small breathing room when wrapped */
+}
+
+/* ✅ separators look weird when wrapped; hide on smaller widths */
+@media (max-width: 980px) {
+  .kg-tb-separator {
+    display: none;
+  }
 }
 
 /* ---- Controls in toolbar ---- */
@@ -177,7 +198,8 @@
 /* ---- Command wrapper: input + inline "i" ---- */
 
 .kg-command-wrapper {
-  flex: 1;
+  flex: 1 1 260px;
+  min-width: 220px;
   display: flex;
   align-items: center;
   background: #f9fafb;
@@ -186,8 +208,10 @@
   padding-right: 4px;
 }
 
+/* ✅ critical: allow flex input to shrink without pushing overflow */
 .kg-command-wrapper .kg-command-input {
   flex: 1;
+  min-width: 0;
   border: none;
   background: transparent;
   padding: 6px 8px;
@@ -217,4 +241,61 @@
 .kg-secondary-pill--active {
   filter: brightness(1.05);
   box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.12) inset;
+}
+
+/* ---- Advanced popover (prevents toolbar stretching) ---- */
+
+.kg-tb-advanced {
+  position: relative;
+}
+
+.kg-tb-advanced-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  padding: 10px;
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.15);
+  min-width: 380px;
+}
+
+.kg-tb-advanced-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.kg-tb-muted {
+  font-size: 11px;
+  color: #6b7280;
+}
+
+.kg-tb-small-input {
+  width: 140px;
+  height: 28px;
+  font-size: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: #ffffff;
+  color: #111827;
+}
+
+/* legacy helper classes (safe to keep) */
+.kg-toolbar-inner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.kg-toolbar-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
 }

@@ -14,6 +14,7 @@ import {
   EdgeFormModal,
   HelpModal,
   EdgeModeBanner,
+  GuideModal,
   Toast,
 } from './Popovers';
 
@@ -26,6 +27,20 @@ import { serializeGraphToRDF } from './io/rdfExport';
 import './Graph.css';
 
 const SPARQL_ENABLED = false; // keep SPARQL code, but hide UI + hotkeys
+
+// A small categorical palette (repeatable)
+const COLOR_PALETTE = [
+  '#1f77b4',
+  '#ff7f0e',
+  '#2ca02c',
+  '#d62728',
+  '#9467bd',
+  '#8c564b',
+  '#e377c2',
+  '#7f7f7f',
+  '#bcbd22',
+  '#17becf',
+];
 
 export default function Graph() {
   const { networkRef, network } = useVisNetwork();
@@ -117,6 +132,46 @@ export default function Graph() {
     setFilters([]);
   };
 
+  // Color-by (node/edge)
+  const [nodeColorBy, setNodeColorBy] = useState('none'); // 'none' | 'label' | 'type' | 'custom'
+  const [nodeColorKey, setNodeColorKey] = useState('type');
+
+  const [edgeColorBy, setEdgeColorBy] = useState('none'); // 'none' | 'label' | 'type' | 'custom'
+  const [edgeColorKey, setEdgeColorKey] = useState('label');
+
+  // Stable mapping: value -> color
+  const nodeColorMapRef = useRef(new Map());
+  const edgeColorMapRef = useRef(new Map());
+
+  // Reset mapping when mode/key changes (so colors don’t “carry over” weirdly)
+  useEffect(() => {
+    nodeColorMapRef.current = new Map();
+  }, [nodeColorBy, nodeColorKey]);
+
+  useEffect(() => {
+    edgeColorMapRef.current = new Map();
+  }, [edgeColorBy, edgeColorKey]);
+
+  const pickColor = useCallback((mapRef, rawValue) => {
+    const v = String(rawValue ?? '').trim();
+    if (!v) return null;
+
+    const map = mapRef.current;
+    if (map.has(v)) return map.get(v);
+
+    const next = COLOR_PALETTE[map.size % COLOR_PALETTE.length];
+    map.set(v, next);
+    return next;
+  }, []);
+
+  const getColorValue = (obj, by, customKey) => {
+    if (by === 'none') return null;
+    if (by === 'label') return obj?.label ?? obj?.name ?? null;
+    if (by === 'type') return obj?.type ?? null;
+    if (by === 'custom') return customKey ? obj?.[customKey] : null;
+    return null;
+  };
+
   // Edge creation UI
   const [edgeFrom, setEdgeFrom] = useState(null);
   const [quickAdd, setQuickAdd] = useState(null);
@@ -130,6 +185,7 @@ export default function Graph() {
 
   // Help + toast
   const [helpOpen, setHelpOpen] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false); // canvas/ui guide
   const [toast, setToast] = useState(null);
   const notifyTimer = useRef(null);
   const notify = useCallback((msg, level = 'info', ms = 2000) => {
@@ -145,23 +201,50 @@ export default function Graph() {
   }, [network]);
 
   // Helper: always use String(node.id) as vis id
-  const toVisNodeStable = useCallback((n) => {
-    const v = toVisNode(n) || {};
-    const rawId = n.id;
-    const visId = String(rawId);
-    return {
-      ...v,
-      id: visId, // vis-network id
-      _rawId: rawId, // keep original just in case
-    };
-  }, []);
+  const toVisNodeStable = useCallback(
+    (n) => {
+      const raw = toVisNode(n) || {};
+      const rawId = n.id;
+      const visId = String(rawId);
+
+      // 🔥 Prevent vis-network auto-coloring via `group` unless we want it
+      const { group: _ignoreGroup, color: _ignoreColor, ...v } = raw;
+
+      const colorValue = getColorValue(n, nodeColorBy, nodeColorKey);
+      const color = colorValue != null ? pickColor(nodeColorMapRef, colorValue) : null;
+
+      return {
+        ...v,
+        id: visId,
+        _rawId: rawId,
+        ...(color ? { color: { background: color, border: color } } : {}),
+      };
+    },
+    [nodeColorBy, nodeColorKey, pickColor],
+  );
+
+  const toVisEdgeStable = useCallback(
+    (e) => {
+      const raw = toVisEdge(e) || {};
+      const { color: _ignoreColor, ...v } = raw;
+
+      const colorValue = getColorValue(e, edgeColorBy, edgeColorKey);
+      const color = colorValue != null ? pickColor(edgeColorMapRef, colorValue) : null;
+
+      return { ...v, ...(color ? { color } : {}) };
+    },
+    [edgeColorBy, edgeColorKey, pickColor],
+  );
 
   // Map to vis
   const visNodes = useMemo(
     () => graphData.nodes.map(toVisNodeStable),
     [graphData.nodes, toVisNodeStable],
   );
-  const visEdges = useMemo(() => graphData.edges.map(toVisEdge), [graphData.edges]);
+  const visEdges = useMemo(
+    () => graphData.edges.map(toVisEdgeStable),
+    [graphData.edges, toVisEdgeStable],
+  );
 
   // Normal React → vis sync + layout
   useEffect(() => {
@@ -487,6 +570,7 @@ export default function Graph() {
         if (quickEdge) setQuickEdge(null);
         setEdgeFormOpen(false);
         setHelpOpen(false);
+        setGuideOpen(false);
         setSparqlOpen(false);
       }
     };
@@ -923,8 +1007,8 @@ export default function Graph() {
           skipVisSyncRef.current = true;
           network.setData({ nodes: [], edges: [] }); // clear canvas completely
           network.setData({
-            nodes: sub.nodes.map(toVisNode),
-            edges: sub.edges.map(toVisEdge),
+            nodes: sub.nodes.map(toVisNodeStable),
+            edges: sub.edges.map(toVisEdgeStable),
           });
         } finally {
           skipVisSyncRef.current = false;
@@ -934,7 +1018,7 @@ export default function Graph() {
       setSparqlActive(true);
       setTimeout(() => network?.fit({ animation: { duration: 300 } }), 0);
     },
-    [network],
+    [network, toVisEdgeStable, toVisNodeStable],
   );
 
   const hardReplaceVisGraph = useCallback(
@@ -969,7 +1053,7 @@ export default function Graph() {
         network.setData({ nodes: [], edges: [] });
         network.setData({
           nodes: safeGraph.nodes.map(toVisNodeStable),
-          edges: safeGraph.edges.map(toVisEdge),
+          edges: safeGraph.edges.map(toVisEdgeStable),
         });
       } finally {
         skipVisSyncRef.current = false;
@@ -1003,7 +1087,7 @@ export default function Graph() {
         setTimeout(doFit, 120);
       });
     },
-    [network, toVisNodeStable, applyLayout, layoutMode],
+    [network, toVisNodeStable, toVisEdgeStable, applyLayout, layoutMode],
   );
 
   const applyFocusSubgraph = useCallback(
@@ -1024,8 +1108,8 @@ export default function Graph() {
         skipVisSyncRef.current = true;
         network.setData({ nodes: [], edges: [] });
         network.setData({
-          nodes: baseline.nodes.map(toVisNode),
-          edges: baseline.edges.map(toVisEdge),
+          nodes: baseline.nodes.map(toVisNodeStable),
+          edges: baseline.edges.map(toVisEdgeStable),
         });
       } finally {
         skipVisSyncRef.current = false;
@@ -1035,7 +1119,7 @@ export default function Graph() {
     setSparqlActive(false);
     setTimeout(() => network?.fit({ animation: { duration: 300 } }), 0);
     notify('SPARQL view cleared', 'info');
-  }, [sparqlActive, graphData, network, notify]);
+  }, [sparqlActive, graphData, network, notify, toVisNodeStable, toVisEdgeStable]);
 
   const onRunSparql = useCallback(
     async (query) => {
@@ -1768,6 +1852,14 @@ export default function Graph() {
           activeViewId={activeViewId}
           onActivateView={activateView}
           onRemoveView={removeView}
+          nodeColorBy={nodeColorBy}
+          setNodeColorBy={setNodeColorBy}
+          nodeColorKey={nodeColorKey}
+          setNodeColorKey={setNodeColorKey}
+          edgeColorBy={edgeColorBy}
+          setEdgeColorBy={setEdgeColorBy}
+          edgeColorKey={edgeColorKey}
+          setEdgeColorKey={setEdgeColorKey}
         />
       </div>
 
@@ -1782,6 +1874,15 @@ export default function Graph() {
             Search/filter in the bar · Focus selection saves a view (Neighbors toggle =
             1-hop)
           </p>
+
+          <button
+            type="button"
+            className="kg-hint-help"
+            title="Graph guide"
+            onClick={() => setGuideOpen(true)}
+          >
+            ?
+          </button>
 
           {SPARQL_ENABLED && sparqlActive && (
             <button
@@ -1996,6 +2097,11 @@ export default function Graph() {
         open={helpOpen}
         onClose={() => setHelpOpen(false)}
         onInsertCommand={setCommand}
+      />
+
+      <GuideModal
+        open={guideOpen}
+        onClose={() => setGuideOpen(false)}
       />
 
       <Toast toast={toast} />

@@ -175,22 +175,10 @@ export const HelpModal = ({ open, onClose, onInsertCommand }) => {
   if (!open) return null;
 
   const searchExamples = [
-    {
-      cmd: 'alice',
-      desc: 'Find nodes where label, name or id contains "alice".',
-    },
-    {
-      cmd: 'node.label=Person',
-      desc: 'Nodes whose label contains "Person".',
-    },
-    {
-      cmd: 'node.id=5',
-      desc: 'Node with id 5 (exact match).',
-    },
-    {
-      cmd: 'edge.label=KNOWS',
-      desc: 'Edges whose label contains "KNOWS".',
-    },
+    { cmd: 'alice', desc: 'Find nodes where label, name or id contains "alice".' },
+    { cmd: 'node.label=Person', desc: 'Nodes whose label contains "Person".' },
+    { cmd: 'node.id=5', desc: 'Node with id 5 (exact match).' },
+    { cmd: 'edge.label=KNOWS', desc: 'Edges whose label contains "KNOWS".' },
     {
       cmd: 'type=Person',
       desc: 'Tries matching the "type" field on nodes first, then edges.',
@@ -216,7 +204,7 @@ export const HelpModal = ({ open, onClose, onInsertCommand }) => {
     },
   ];
 
-  const viewExamples = [
+  const viewCmdExamples = [
     {
       cmd: 'view copy',
       desc: 'Copies the current view (what you see right now) as JSON to your clipboard.',
@@ -226,6 +214,32 @@ export const HelpModal = ({ open, onClose, onInsertCommand }) => {
       desc: 'Reads JSON from your clipboard, merges it into the current view, and saves a new merged view.',
     },
   ];
+
+  const Row = ({ cmd, desc }) => (
+    <div
+      key={cmd}
+      style={{
+        display: 'grid',
+        gridTemplateColumns: '1fr auto',
+        gap: 8,
+        marginTop: 8,
+      }}
+    >
+      <code>{cmd}</code>
+      {onInsertCommand && (
+        <button
+          style={btn}
+          onClick={() => {
+            onInsertCommand(cmd);
+            onClose();
+          }}
+        >
+          Try
+        </button>
+      )}
+      <div style={{ gridColumn: '1 / -1', fontSize: 12, color: '#6e7781' }}>{desc}</div>
+    </div>
+  );
 
   return (
     <div
@@ -254,9 +268,8 @@ export const HelpModal = ({ open, onClose, onInsertCommand }) => {
           boxShadow: '0 12px 32px rgba(0,0,0,0.12)',
         }}
       >
-        {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <h4 style={{ margin: 0, flex: 1 }}>Search & Filter Cheat-Sheet</h4>
+          <h4 style={{ margin: 0, flex: 1 }}>Command Bar Cheat-Sheet</h4>
           <button
             style={btn}
             onClick={onClose}
@@ -266,193 +279,185 @@ export const HelpModal = ({ open, onClose, onInsertCommand }) => {
         </div>
 
         <div style={{ fontSize: 13, color: '#57606a', marginTop: 4 }}>
-          Use the big bar + <strong>Run</strong> to search or filter.
+          These are commands you type into the big bar and run with <strong>Enter</strong>{' '}
+          or <strong>Run</strong>.
           <br />
           Searches highlight results; filters add chips and hide everything else.
         </div>
 
-        {/* SEARCH SECTION */}
         <div style={{ marginTop: 16 }}>
-          <div
-            style={{
-              fontWeight: 600,
-              fontSize: 13,
-              marginBottom: 4,
-            }}
-          >
-            🔍 Search examples
-          </div>
+          <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 4 }}>🔍 Search</div>
           <div style={{ fontSize: 12, color: '#57606a', marginBottom: 6 }}>
-            Click <strong>Try</strong> to copy the command into the bar.
+            Click <strong>Try</strong> to copy a command into the bar.
           </div>
-
-          {searchExamples.map(({ cmd, desc }) => (
-            <div
-              key={cmd}
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '1fr auto',
-                gap: 8,
-                marginTop: 8,
-              }}
-            >
-              <code>{cmd}</code>
-              {onInsertCommand && (
-                <button
-                  style={btn}
-                  onClick={() => {
-                    if (onInsertCommand) onInsertCommand(cmd);
-                    onClose();
-                  }}
-                >
-                  Try
-                </button>
-              )}
-              <div
-                style={{
-                  gridColumn: '1 / -1',
-                  fontSize: 12,
-                  color: '#6e7781',
-                }}
-              >
-                {desc}
-              </div>
-            </div>
+          {searchExamples.map((x) => (
+            <Row
+              key={x.cmd}
+              {...x}
+            />
           ))}
         </div>
 
-        {/* FILTER SECTION */}
         <div style={{ marginTop: 20 }}>
-          <div
-            style={{
-              fontWeight: 600,
-              fontSize: 13,
-              marginBottom: 4,
-            }}
-          >
-            🎯 Filter examples
-          </div>
+          <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 4 }}>🎯 Filter</div>
           <div style={{ fontSize: 12, color: '#57606a', marginBottom: 6 }}>
-            Filters stack: each new one narrows the visible subgraph further.
+            Filters stack (each one narrows the visible subgraph).
             <br />
-            Use <code>|</code> inside a value for unions, e.g.{' '}
-            <code>type=Person|Company</code>.
+            Use <code>|</code> for unions, e.g.{' '}
+            <code>filter node:type=Person|Company</code>.
           </div>
-
-          {filterExamples.map(({ cmd, desc }) => (
-            <div
-              key={cmd}
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '1fr auto',
-                gap: 8,
-                marginTop: 8,
-              }}
-            >
-              <code>{cmd}</code>
-              {onInsertCommand && (
-                <button
-                  style={btn}
-                  onClick={() => {
-                    if (onInsertCommand) onInsertCommand(cmd);
-                    onClose();
-                  }}
-                >
-                  Try
-                </button>
-              )}
-              <div
-                style={{
-                  gridColumn: '1 / -1',
-                  fontSize: 12,
-                  color: '#6e7781',
-                }}
-              >
-                {desc}
-              </div>
-            </div>
+          {filterExamples.map((x) => (
+            <Row
+              key={x.cmd}
+              {...x}
+            />
           ))}
         </div>
 
-        {/* VIEWS SECTION */}
         <div style={{ marginTop: 20 }}>
-          <div
-            style={{
-              fontWeight: 600,
-              fontSize: 13,
-              marginBottom: 4,
-            }}
-          >
-            🧩 Views (save / switch / merge)
+          <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 4 }}>
+            🧩 View commands
           </div>
-
-          <div style={{ fontSize: 12, color: '#57606a', marginBottom: 10 }}>
-            <div style={{ marginBottom: 6 }}>
-              <b>Switch view:</b> click a view chip (or <b>Main</b>).
-            </div>
-
-            <div style={{ marginBottom: 6 }}>
-              <b>Merge views (UI):</b> hold <b>Ctrl</b> (Windows/Linux) or <b>Cmd</b>{' '}
-              (Mac) and click <b>2+</b> view chips (including <b>Main</b>).
-              Selected-for-merge chips get a dark outline. Then click{' '}
-              <b>Merge selected</b>.
-            </div>
-
-            <div style={{ marginBottom: 6 }}>
-              <b>Remove a view:</b> click the <b>×</b> on the chip.
-            </div>
-
-            <div>
-              <b>Copy/paste workflow:</b> View A → <code>view copy</code>, switch to View
-              B →<code>view paste</code> (creates a new merged view).
-            </div>
+          <div style={{ fontSize: 12, color: '#57606a', marginBottom: 6 }}>
+            These also run in the command bar.
           </div>
-
-          {viewExamples.map(({ cmd, desc }) => (
-            <div
-              key={cmd}
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '1fr auto',
-                gap: 8,
-                marginTop: 8,
-              }}
-            >
-              <code>{cmd}</code>
-              {onInsertCommand && (
-                <button
-                  style={btn}
-                  onClick={() => {
-                    onInsertCommand(cmd);
-                    onClose();
-                  }}
-                >
-                  Try
-                </button>
-              )}
-              <div
-                style={{
-                  gridColumn: '1 / -1',
-                  fontSize: 12,
-                  color: '#6e7781',
-                }}
-              >
-                {desc}
-              </div>
-            </div>
+          {viewCmdExamples.map((x) => (
+            <Row
+              key={x.cmd}
+              {...x}
+            />
           ))}
         </div>
 
-        <div
-          style={{
-            marginTop: 16,
-            fontSize: 11,
-            color: '#8c959f',
-          }}
-        >
-          Tip: Press <code>Enter</code> in the search bar or click <strong>Run</strong> to
-          execute the current command.
+        <div style={{ marginTop: 16, fontSize: 11, color: '#8c959f' }}>
+          Tip: Press <code>Esc</code> to close popovers/modals.
         </div>
+      </div>
+    </div>
+  );
+};
+
+// add this NEW export in Popovers.jsx (below HelpModal is fine)
+
+export const GuideModal = ({ open, onClose }) => {
+  if (!open) return null;
+
+  const Section = ({ title, children }) => (
+    <div style={{ marginTop: 14 }}>
+      <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>{title}</div>
+      <div style={{ fontSize: 12, color: '#57606a', lineHeight: 1.45 }}>{children}</div>
+    </div>
+  );
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,0.25)',
+        display: 'grid',
+        placeItems: 'center',
+        zIndex: 60,
+      }}
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        style={{
+          background: '#fff',
+          border: '1px solid #d0d7de',
+          borderRadius: 12,
+          padding: 16,
+          width: 560,
+          maxWidth: '90vw',
+          maxHeight: '80vh',
+          overflowY: 'auto',
+          boxShadow: '0 12px 32px rgba(0,0,0,0.12)',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <h4 style={{ margin: 0, flex: 1 }}>Graph Guide</h4>
+          <button
+            style={btn}
+            onClick={onClose}
+          >
+            Close
+          </button>
+        </div>
+
+        <Section title="🖱️ Canvas interactions">
+          <ul style={{ margin: '6px 0 0 18px', padding: 0 }}>
+            <li>
+              <b>Double-click empty</b>: add node
+            </li>
+            <li>
+              <b>Double-click node/edge</b>: open properties panel
+            </li>
+            <li>
+              <b>Right-click node</b>: edge mode (right-click target node to create edge)
+            </li>
+            <li>
+              <b>Shift + drag</b>: box select
+            </li>
+            <li>
+              <b>Ctrl/Cmd-click</b>: toggle selection (multi-select)
+            </li>
+            <li>
+              <b>Esc</b>: cancel edge mode + close popovers/modals
+            </li>
+          </ul>
+        </Section>
+
+        <Section title="🎛️ Toolbar buttons">
+          <ul style={{ margin: '6px 0 0 18px', padding: 0 }}>
+            <li>
+              <b>Center</b>: fit/center graph on screen
+            </li>
+            <li>
+              <b>Layout</b>: switch force / hierarchical
+            </li>
+            <li>
+              <b>Advanced → Color</b>: color nodes/edges by label/type/custom key
+            </li>
+            <li>
+              <b>Focus selection</b>: saves a new view from selection (optionally includes
+              1-hop neighbors)
+            </li>
+            <li>
+              <b>Neighbors toggle</b>: includes 1-hop neighbors when focusing
+            </li>
+            <li>
+              <b>Clear focus</b>: return to Main view
+            </li>
+          </ul>
+        </Section>
+
+        <Section title="🧩 Views (UI)">
+          <ul style={{ margin: '6px 0 0 18px', padding: 0 }}>
+            <li>Click a view chip to switch</li>
+            <li>
+              Remove a view with the <b>×</b> on the chip
+            </li>
+            <li>
+              Merge views: Ctrl/Cmd-click 2+ chips → <b>Merge selected</b>
+            </li>
+          </ul>
+        </Section>
+
+        <Section title="📁 Import / Export">
+          <ul style={{ margin: '6px 0 0 18px', padding: 0 }}>
+            <li>
+              <b>File → Import JSON/RDF</b>
+            </li>
+            <li>
+              <b>File → Download JSON/Turtle/N-Triples</b> (exports current view)
+            </li>
+            <li>
+              <b>Copy JSON</b> copies current view to clipboard
+            </li>
+          </ul>
+        </Section>
       </div>
     </div>
   );

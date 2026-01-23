@@ -1,5 +1,5 @@
 // src/components/Graph/Toolbar.jsx
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import './Toolbar.css';
 
 export default function Toolbar(props) {
@@ -31,15 +31,31 @@ export default function Toolbar(props) {
     includeNeighbors,
     setIncludeNeighbors,
     onMergeSelectedViews,
+    nodeColorBy,
+    setNodeColorBy,
+    nodeColorKey,
+    setNodeColorKey,
+    edgeColorBy,
+    setEdgeColorBy,
+    edgeColorKey,
+    setEdgeColorKey,
   } = props;
 
   const [addOpen, setAddOpen] = useState(false);
   const [fileOpen, setFileOpen] = useState(false);
 
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+
   const [mergeSel, setMergeSel] = useState(() => new Set());
 
   const jsonInputRef = useRef(null);
   const rdfInputRef = useRef(null);
+
+  useEffect(() => {
+    const onDoc = () => setAdvancedOpen(false);
+    if (advancedOpen) document.addEventListener('click', onDoc);
+    return () => document.removeEventListener('click', onDoc);
+  }, [advancedOpen]);
 
   const toggleMergeSel = (id) => {
     setMergeSel((prev) => {
@@ -82,6 +98,7 @@ export default function Toolbar(props) {
   const closeMenus = () => {
     setAddOpen(false);
     setFileOpen(false);
+    setAdvancedOpen(false);
   };
 
   return (
@@ -93,13 +110,21 @@ export default function Toolbar(props) {
             <button
               type="button"
               className="kg-btn-ghost"
-              onClick={() => setAddOpen((v) => !v)}
+              onClick={(e) => {
+                e.stopPropagation();
+                setFileOpen(false);
+                setAdvancedOpen(false);
+                setAddOpen((v) => !v);
+              }}
             >
               + Add ▾
             </button>
 
             {addOpen && (
-              <div className="kg-dropdown-menu">
+              <div
+                className="kg-dropdown-menu"
+                onClick={(e) => e.stopPropagation()}
+              >
                 <button
                   type="button"
                   className="kg-dropdown-item"
@@ -179,6 +204,73 @@ export default function Toolbar(props) {
             <option value="hierLR">Hierarchical (horizontal)</option>
           </select>
 
+          <div className="kg-tb-advanced">
+            <button
+              type="button"
+              className="kg-btn-ghost"
+              onClick={(e) => {
+                e.stopPropagation();
+                setAddOpen(false);
+                setFileOpen(false);
+                setAdvancedOpen((v) => !v);
+              }}
+              aria-expanded={advancedOpen}
+            >
+              Advanced ▾
+            </button>
+
+            {advancedOpen && (
+              <div
+                className="kg-tb-advanced-popover"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="kg-tb-advanced-row">
+                  <span className="kg-tb-muted">Color</span>
+
+                  <select
+                    className="kg-layout-select"
+                    value={nodeColorBy || 'none'}
+                    onChange={(e) => setNodeColorBy && setNodeColorBy(e.target.value)}
+                  >
+                    <option value="none">Nodes: none</option>
+                    <option value="label">Nodes: label</option>
+                    <option value="type">Nodes: type</option>
+                    <option value="custom">Nodes: custom</option>
+                  </select>
+
+                  {nodeColorBy === 'custom' && (
+                    <input
+                      className="kg-tb-small-input"
+                      placeholder="node key"
+                      value={nodeColorKey || ''}
+                      onChange={(e) => setNodeColorKey && setNodeColorKey(e.target.value)}
+                    />
+                  )}
+
+                  <select
+                    className="kg-layout-select"
+                    value={edgeColorBy || 'none'}
+                    onChange={(e) => setEdgeColorBy && setEdgeColorBy(e.target.value)}
+                  >
+                    <option value="none">Edges: none</option>
+                    <option value="label">Edges: label</option>
+                    <option value="type">Edges: type</option>
+                    <option value="custom">Edges: custom</option>
+                  </select>
+
+                  {edgeColorBy === 'custom' && (
+                    <input
+                      className="kg-tb-small-input"
+                      placeholder="edge key"
+                      value={edgeColorKey || ''}
+                      onChange={(e) => setEdgeColorKey && setEdgeColorKey(e.target.value)}
+                    />
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
           <button
             type="button"
             className="kg-btn-ghost"
@@ -217,13 +309,21 @@ export default function Toolbar(props) {
             <button
               type="button"
               className="kg-btn-ghost"
-              onClick={() => setFileOpen((v) => !v)}
+              onClick={(e) => {
+                e.stopPropagation();
+                setAddOpen(false);
+                setAdvancedOpen(false);
+                setFileOpen((v) => !v);
+              }}
             >
               File ▾
             </button>
 
             {fileOpen && (
-              <div className="kg-dropdown-menu kg-dropdown-menu-right">
+              <div
+                className="kg-dropdown-menu kg-dropdown-menu-right"
+                onClick={(e) => e.stopPropagation()}
+              >
                 <div className="kg-dropdown-label">JSON</div>
 
                 <button

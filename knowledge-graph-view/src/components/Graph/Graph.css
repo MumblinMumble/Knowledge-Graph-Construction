@@ -43,6 +43,33 @@
   color: #9ca3af;
 }
 
+/* right-side help button next to the hint */
+.kg-hint-help {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid #e5e7eb;
+  background: #f9fafb;
+  font-size: 0.75rem;
+  padding: 0;
+  cursor: pointer;
+  color: #111827;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.kg-hint-help:hover {
+  background: #e5e7eb;
+}
+
+.kg-hint-help:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.15);
+}
+
 .kg-secondary-pill {
   border-radius: 999px;
   border: 1px solid #e5e7eb;
