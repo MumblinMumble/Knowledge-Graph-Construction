@@ -66,6 +66,21 @@ export default function Graph() {
   const marqueeSelectionRef = useRef([]);
   const marqueeAdditiveRef = useRef(false);
 
+  const marqueePrevInteractionRef = useRef(null);
+
+  const marqueeRafRef = useRef(0);
+  const marqueePendingRef = useRef(null);
+
+  const setMarqueeBoxRaf = useCallback((nextBox) => {
+    marqueePendingRef.current = nextBox;
+    if (marqueeRafRef.current) return;
+
+    marqueeRafRef.current = requestAnimationFrame(() => {
+      marqueeRafRef.current = 0;
+      setMarqueeBox(marqueePendingRef.current);
+    });
+  }, []);
+
   // Layout
   const [layoutMode, setLayoutMode] = useState('force');
   const { applyLayout } = useLayout(networkRef, network, graphData);
@@ -867,9 +882,18 @@ export default function Graph() {
       const nodeId = network.getNodeAt({ x, y });
       if (nodeId != null) return;
 
+      marqueePrevInteractionRef.current = {
+        dragView: network?.options?.interaction?.dragView,
+        dragNodes: network?.options?.interaction?.dragNodes,
+        zoomView: network?.options?.interaction?.zoomView,
+      };
+      network.setOptions({
+        interaction: { dragView: false, dragNodes: false, zoomView: false },
+      });
+
       isMarqueeActiveRef.current = true;
       marqueeStartRef.current = { x, y };
-      setMarqueeBox({ left: x, top: y, width: 0, height: 0 });
+      setMarqueeBoxRaf({ left: x, top: y, width: 0, height: 0 });
 
       // Avoid panning while dragging the marquee
       e.preventDefault();
@@ -877,6 +901,7 @@ export default function Graph() {
 
     const onMouseMove = (e) => {
       if (!isMarqueeActiveRef.current) return;
+      e.preventDefault();
 
       const rect = container.getBoundingClientRect();
       const x = e.clientX - rect.left;
@@ -889,14 +914,26 @@ export default function Graph() {
       const width = Math.abs(x - start.x);
       const height = Math.abs(y - start.y);
 
-      setMarqueeBox({ left, top, width, height });
+      setMarqueeBoxRaf({ left, top, width, height });
     };
 
     const finishSelection = () => {
       if (!isMarqueeActiveRef.current) return;
       isMarqueeActiveRef.current = false;
 
-      setMarqueeBox((box) => {
+      const prev = marqueePrevInteractionRef.current;
+      if (prev) {
+        network.setOptions({
+          interaction: {
+            dragView: prev.dragView ?? true,
+            dragNodes: prev.dragNodes ?? true,
+            zoomView: prev.zoomView ?? true,
+          },
+        });
+        marqueePrevInteractionRef.current = null;
+      }
+
+      setMarqueeBoxRaf((box) => {
         if (!box) return null;
         const { left, top, width, height } = box;
         const x1 = left;
@@ -964,7 +1001,7 @@ export default function Graph() {
 
           if (!marqueeAdditiveRef.current) {
             const first = Array.from(nextNodesSet)[0];
-            if (first) network.focus(first, { scale: 1, animation: { duration: 300 } });
+            if (first) network.focus(first, { scale: 1, animation: { duration: 0 } });
           }
 
           suppressNextClickRef.current = true;
@@ -996,7 +1033,7 @@ export default function Graph() {
       window.removeEventListener('mouseup', onMouseUp);
       container.removeEventListener('mouseleave', onMouseLeave);
     };
-  }, [networkRef, network, graphData, selectNodesAndEdges, notify]);
+  }, [networkRef, network, graphData, selectNodesAndEdges, notify, setMarqueeBoxRaf]);
 
   // SPARQL hard-replace apply/clear
   const applySparqlSubgraph = useCallback(
@@ -1764,7 +1801,10 @@ export default function Graph() {
   }, [activateView, notify]);
 
   const fitToScreen = () =>
-    network?.fit({ animation: { duration: 300, easingFunction: 'easeInOutQuad' } });
+    network?.fit({
+      animation: { duration: 300, easingFunction: 'easeInOutQuad' },
+      offset: { x: 0, y: -60 },
+    });
 
   return (
     <div className="kg-graph">

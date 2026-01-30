@@ -10,7 +10,7 @@ export default function Toolbar(props) {
     onRunString,
     onFit,
     onFocusSelection,
-    onClearFocus,
+    // onClearFocus,
     layoutMode,
     setLayoutMode,
     onImportJSON,
@@ -43,7 +43,6 @@ export default function Toolbar(props) {
 
   const [addOpen, setAddOpen] = useState(false);
   const [fileOpen, setFileOpen] = useState(false);
-
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const [mergeSel, setMergeSel] = useState(() => new Set());
@@ -51,11 +50,9 @@ export default function Toolbar(props) {
   const jsonInputRef = useRef(null);
   const rdfInputRef = useRef(null);
 
-  useEffect(() => {
-    const onDoc = () => setAdvancedOpen(false);
-    if (advancedOpen) document.addEventListener('click', onDoc);
-    return () => document.removeEventListener('click', onDoc);
-  }, [advancedOpen]);
+  const addWrapRef = useRef(null);
+  const fileWrapRef = useRef(null);
+  const advWrapRef = useRef(null);
 
   const toggleMergeSel = (id) => {
     setMergeSel((prev) => {
@@ -68,17 +65,11 @@ export default function Toolbar(props) {
 
   const describeFilter = (f) => {
     if (!f || !f.payload) return 'Filter';
-
     const { key, value, values } = f.payload;
     const vals = values && values.length ? values : value != null ? [value] : [];
     const prettyVals = vals.join(' | ');
-
-    if (f.kind === 'filterNodePropEq') {
-      return `${key} = ${prettyVals}`;
-    }
-    if (f.kind === 'filterEdgePropEq') {
-      return `edge ${key} = ${prettyVals}`;
-    }
+    if (f.kind === 'filterNodePropEq') return `${key} = ${prettyVals}`;
+    if (f.kind === 'filterEdgePropEq') return `edge ${key} = ${prettyVals}`;
     return 'Filter';
   };
 
@@ -101,30 +92,49 @@ export default function Toolbar(props) {
     setAdvancedOpen(false);
   };
 
+  // close popovers on outside click
+  useEffect(() => {
+    const onDoc = (e) => {
+      const t = e.target;
+
+      const insideAdd = addWrapRef.current?.contains(t);
+      const insideFile = fileWrapRef.current?.contains(t);
+      const insideAdv = advWrapRef.current?.contains(t);
+
+      if (!insideAdd) setAddOpen(false);
+      if (!insideFile) setFileOpen(false);
+      if (!insideAdv) setAdvancedOpen(false);
+    };
+
+    if (addOpen || fileOpen || advancedOpen) {
+      document.addEventListener('mousedown', onDoc);
+      return () => document.removeEventListener('mousedown', onDoc);
+    }
+  }, [addOpen, fileOpen, advancedOpen]);
+
   return (
     <div className="kg-tb">
+      {/* ROW 1: main toolbar controls */}
       <div className="kg-tb-row-main">
         {/* Group 1: Add */}
-        <div className="kg-tb-group kg-tb-group-add">
-          <div className="kg-dropdown">
+        <div
+          className="kg-tb-group kg-tb-group-add"
+          data-tooltip="Add Nodes or Edges"
+        >
+          <div
+            className="kg-dropdown"
+            ref={addWrapRef}
+          >
             <button
               type="button"
               className="kg-btn-ghost"
-              onClick={(e) => {
-                e.stopPropagation();
-                setFileOpen(false);
-                setAdvancedOpen(false);
-                setAddOpen((v) => !v);
-              }}
+              onClick={() => setAddOpen((v) => !v)}
             >
               + Add ▾
             </button>
 
             {addOpen && (
-              <div
-                className="kg-dropdown-menu"
-                onClick={(e) => e.stopPropagation()}
-              >
+              <div className="kg-dropdown-menu">
                 <button
                   type="button"
                   className="kg-dropdown-item"
@@ -152,13 +162,16 @@ export default function Toolbar(props) {
 
         <div className="kg-tb-separator" />
 
-        {/* Group 2: search bar + Run (with "i" inside the bar) */}
-        <div className="kg-tb-group kg-tb-group-search">
+        {/* Group 2: search bar + Run */}
+        <div
+          className="kg-tb-group kg-tb-group-search"
+          data-tooltip="Basic search and extra commands such as filter and view management"
+        >
           <div className="kg-command-wrapper">
             <input
               type="text"
               className="kg-command-input"
-              placeholder="node.key=value · edge.key=value · filter node:key=value · filter edge:key=value"
+              placeholder="Search or type a command…"
               value={command}
               onChange={(e) => setCommand(e.target.value)}
               onKeyDown={handleCommandKeyDown}
@@ -166,7 +179,7 @@ export default function Toolbar(props) {
             <button
               type="button"
               className="kg-icon-button kg-icon-inline"
-              title="Keyboard shortcuts & tips"
+              title="Search bar commands"
               onClick={onOpenHelp}
             >
               i
@@ -178,22 +191,102 @@ export default function Toolbar(props) {
             className="kg-btn-primary"
             onClick={handleRun}
           >
-            Run
+            ➤
           </button>
         </div>
 
         <div className="kg-tb-separator" />
 
-        {/* Group 3: Fit + layout + focus */}
-        <div className="kg-tb-group kg-tb-group-layout">
+        {/* Group 3: Reset View*/}
+        <div
+          className="kg-tb-group kg-tb-group-reset"
+          data-tooltip="Reset the current graph view to its center position"
+        >
           <button
             type="button"
             className="kg-btn-ghost"
             onClick={onFit}
           >
-            Center
+            Reset Screen
+          </button>
+        </div>
+
+        <div className="kg-tb-separator" />
+
+        {/* Group 4: Advanced colour popover */}
+        <div
+          className="kg-tb-advanced"
+          ref={advWrapRef}
+          data-tooltip="Colour options for nodes and edges based on any value present in it"
+        >
+          <button
+            type="button"
+            className="kg-btn-ghost"
+            onClick={() => setAdvancedOpen((v) => !v)}
+            aria-expanded={advancedOpen}
+          >
+            Colour by ▾
           </button>
 
+          {advancedOpen && (
+            <div
+              className="kg-tb-advanced-popover"
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <div className="kg-tb-advanced-row">
+                <select
+                  className="kg-layout-select"
+                  value={nodeColorBy || 'none'}
+                  onChange={(e) => setNodeColorBy && setNodeColorBy(e.target.value)}
+                  title="Node color by"
+                >
+                  <option value="none">Nodes: none</option>
+                  <option value="label">Nodes: label</option>
+                  <option value="type">Nodes: type</option>
+                  <option value="custom">Nodes: custom</option>
+                </select>
+
+                {nodeColorBy === 'custom' && (
+                  <input
+                    className="kg-tb-small-input"
+                    placeholder="node key"
+                    value={nodeColorKey || ''}
+                    onChange={(e) => setNodeColorKey && setNodeColorKey(e.target.value)}
+                  />
+                )}
+
+                <select
+                  className="kg-layout-select"
+                  value={edgeColorBy || 'none'}
+                  onChange={(e) => setEdgeColorBy && setEdgeColorBy(e.target.value)}
+                  title="Edge color by"
+                >
+                  <option value="none">Edges: none</option>
+                  <option value="label">Edges: label</option>
+                  <option value="type">Edges: type</option>
+                  <option value="custom">Edges: custom</option>
+                </select>
+
+                {edgeColorBy === 'custom' && (
+                  <input
+                    className="kg-tb-small-input"
+                    placeholder="edge key"
+                    value={edgeColorKey || ''}
+                    onChange={(e) => setEdgeColorKey && setEdgeColorKey(e.target.value)}
+                  />
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="kg-tb-separator" />
+
+        {/* Group 5: layout*/}
+        <div
+          className="kg-tb-group kg-tb-group-layout"
+          data-tooltip="Choose the layout of the graph from the given options"
+        >
           <select
             className="kg-layout-select"
             value={layoutMode}
@@ -203,81 +296,22 @@ export default function Toolbar(props) {
             <option value="hierUD">Hierarchical (vertical)</option>
             <option value="hierLR">Hierarchical (horizontal)</option>
           </select>
+        </div>
 
-          <div className="kg-tb-advanced">
-            <button
-              type="button"
-              className="kg-btn-ghost"
-              onClick={(e) => {
-                e.stopPropagation();
-                setAddOpen(false);
-                setFileOpen(false);
-                setAdvancedOpen((v) => !v);
-              }}
-              aria-expanded={advancedOpen}
-            >
-              Advanced ▾
-            </button>
+        <div className="kg-tb-separator" />
 
-            {advancedOpen && (
-              <div
-                className="kg-tb-advanced-popover"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="kg-tb-advanced-row">
-                  <span className="kg-tb-muted">Color</span>
-
-                  <select
-                    className="kg-layout-select"
-                    value={nodeColorBy || 'none'}
-                    onChange={(e) => setNodeColorBy && setNodeColorBy(e.target.value)}
-                  >
-                    <option value="none">Nodes: none</option>
-                    <option value="label">Nodes: label</option>
-                    <option value="type">Nodes: type</option>
-                    <option value="custom">Nodes: custom</option>
-                  </select>
-
-                  {nodeColorBy === 'custom' && (
-                    <input
-                      className="kg-tb-small-input"
-                      placeholder="node key"
-                      value={nodeColorKey || ''}
-                      onChange={(e) => setNodeColorKey && setNodeColorKey(e.target.value)}
-                    />
-                  )}
-
-                  <select
-                    className="kg-layout-select"
-                    value={edgeColorBy || 'none'}
-                    onChange={(e) => setEdgeColorBy && setEdgeColorBy(e.target.value)}
-                  >
-                    <option value="none">Edges: none</option>
-                    <option value="label">Edges: label</option>
-                    <option value="type">Edges: type</option>
-                    <option value="custom">Edges: custom</option>
-                  </select>
-
-                  {edgeColorBy === 'custom' && (
-                    <input
-                      className="kg-tb-small-input"
-                      placeholder="edge key"
-                      value={edgeColorKey || ''}
-                      onChange={(e) => setEdgeColorKey && setEdgeColorKey(e.target.value)}
-                    />
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-
+        {/* Group 6: View*/}
+        <div
+          className="kg-tb-group kg-tb-group-layout"
+          data-tooltip="Creation of views from the current graph view based on whats selected"
+        >
           <button
             type="button"
             className="kg-btn-ghost"
             onClick={onFocusSelection}
             disabled={!onFocusSelection}
           >
-            Focus selection
+            Save View
           </button>
 
           <button
@@ -288,42 +322,40 @@ export default function Toolbar(props) {
             onClick={() => setIncludeNeighbors((v) => !v)}
             title="When on, Focus includes 1-hop neighbors of selected nodes"
           >
-            Neighbors: {includeNeighbors ? 'On' : 'Off'}
+            Include Neighbors: {includeNeighbors ? 'On' : 'Off'}
           </button>
 
-          <button
+          {/* <button
             type="button"
             className="kg-btn-ghost"
             onClick={onClearFocus}
             disabled={!onClearFocus}
           >
             Clear focus
-          </button>
+          </button> */}
         </div>
 
         <div className="kg-tb-separator" />
 
-        {/* Group 4: File */}
-        <div className="kg-tb-group kg-tb-group-file">
-          <div className="kg-dropdown">
+        {/* Group 7: File */}
+        <div
+          className="kg-tb-group kg-tb-group-file"
+          data-tooltip="Loading and Saving of the graphs or views"
+        >
+          <div
+            className="kg-dropdown"
+            ref={fileWrapRef}
+          >
             <button
               type="button"
               className="kg-btn-ghost"
-              onClick={(e) => {
-                e.stopPropagation();
-                setAddOpen(false);
-                setAdvancedOpen(false);
-                setFileOpen((v) => !v);
-              }}
+              onClick={() => setFileOpen((v) => !v)}
             >
-              File ▾
+              📁 ▾
             </button>
 
             {fileOpen && (
-              <div
-                className="kg-dropdown-menu kg-dropdown-menu-right"
-                onClick={(e) => e.stopPropagation()}
-              >
+              <div className="kg-dropdown-menu kg-dropdown-menu-right">
                 <div className="kg-dropdown-label">JSON</div>
 
                 <button
@@ -401,186 +433,123 @@ export default function Toolbar(props) {
         </div>
       </div>
 
-      {/* NEW: active filters as chips */}
+      {/* ROW 2: filters chips */}
       {filters.length > 0 && (
-        <div
-          className="kg-tb-filters-row"
-          style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: 8,
-            alignItems: 'center',
-            marginTop: 8,
-          }}
-        >
-          {filters.map((f) => (
-            <button
-              key={f.id}
-              type="button"
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 6,
-                padding: '2px 8px',
-                borderRadius: 999,
-                border: '1px solid #d0d7de',
-                background: '#f6f8fa',
-                fontSize: 11,
-                cursor: 'pointer',
-              }}
-              onClick={() => onRemoveFilter && onRemoveFilter(f.id)}
-              title="Click to remove this filter"
-            >
-              <span>{describeFilter(f)}</span>
-              <span
-                style={{
-                  fontSize: 12,
-                  lineHeight: 1,
-                  paddingLeft: 2,
-                }}
-              >
-                ×
-              </span>
-            </button>
-          ))}
+        <div className="kg-tb-row-chips">
+          <div className="kg-tb-row-title">Filters</div>
 
-          {onClearFilters && (
-            <button
-              type="button"
-              style={{
-                marginLeft: 'auto',
-                fontSize: 11,
-                padding: '2px 8px',
-                borderRadius: 999,
-                border: '1px solid #d0d7de',
-                background: '#ffffff',
-                cursor: 'pointer',
-              }}
-              onClick={onClearFilters}
-            >
-              Clear all
-            </button>
-          )}
+          <div className="kg-tb-chips">
+            {filters.map((f) => (
+              <button
+                key={f.id}
+                type="button"
+                className="kg-chip"
+                onClick={() => onRemoveFilter && onRemoveFilter(f.id)}
+                title="Click to remove this filter"
+              >
+                <span>{describeFilter(f)}</span>
+                <span className="kg-chip-x">×</span>
+              </button>
+            ))}
+
+            {onClearFilters && (
+              <button
+                type="button"
+                className="kg-chip kg-chip-clear"
+                onClick={onClearFilters}
+                title="Clear all filters"
+              >
+                Clear all
+              </button>
+            )}
+          </div>
         </div>
       )}
 
-      {/* NEW: saved views as chips */}
-      {views.length > 0 && (
-        <div
-          className="kg-tb-views-row"
-          style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: 8,
-            alignItems: 'center',
-            marginTop: 8,
-          }}
-        >
-          {/* Main view chip */}
-          <button
-            type="button"
-            onClick={(e) => {
-              if (e.ctrlKey || e.metaKey) {
-                toggleMergeSel('main');
-              } else {
-                setMergeSel(new Set());
-                onActivateView && onActivateView('main');
-              }
-            }}
-            style={{
-              padding: '2px 10px',
-              borderRadius: 999,
-              border: '1px solid #d0d7de',
-              background: activeViewId === 'main' ? '#0366d6' : '#f6f8fa',
-              color: activeViewId === 'main' ? '#ffffff' : '#24292f',
-              fontSize: 11,
-              cursor: 'pointer',
-              outline: mergeSel.has('main') ? '2px solid #111' : 'none',
-              outlineOffset: 2,
-            }}
-            title="Click to switch. Ctrl/Cmd-click to select for merging."
-          >
-            Main
-          </button>
+      {/* ROW 3: views chips (THIS IS THE GUARANTEED NEW LINE) */}
+      {(views.length > 0 || true) && (
+        <div className="kg-tb-row-chips">
+          <div className="kg-tb-row-title">Views</div>
 
-          {views.map((v) => (
+          <div className="kg-tb-chips">
             <button
-              key={v.id}
               type="button"
+              className={`kg-chip ${activeViewId === 'main' ? 'kg-chip--active' : ''}`}
               onClick={(e) => {
-                if (e.ctrlKey || e.metaKey) {
-                  toggleMergeSel(v.id);
-                } else {
+                if (e.ctrlKey || e.metaKey) toggleMergeSel('main');
+                else {
                   setMergeSel(new Set());
-                  onActivateView && onActivateView(v.id);
+                  onActivateView && onActivateView('main');
                 }
               }}
+              title="Click to switch. Ctrl/Cmd-click to select for merging."
               style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 6,
-                padding: '2px 10px',
-                borderRadius: 999,
-                border: '1px solid #d0d7de',
-                background: activeViewId === v.id ? '#0366d6' : '#f6f8fa',
-                color: activeViewId === v.id ? '#ffffff' : '#24292f',
-                fontSize: 11,
-                cursor: 'pointer',
-                outline: mergeSel.has(v.id) ? '2px solid #111' : 'none',
+                outline: mergeSel.has('main') ? '2px solid #111' : 'none',
                 outlineOffset: 2,
               }}
-              title="Click to switch. Ctrl/Cmd-click to select for merging."
             >
-              <span>{v.label}</span>
-              <span
-                style={{
-                  fontSize: 12,
-                  lineHeight: 1,
-                  paddingLeft: 2,
-                  cursor: 'pointer',
-                }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onRemoveView && onRemoveView(v.id);
-                  setMergeSel((prev) => {
-                    const next = new Set(prev);
-                    next.delete(v.id);
-                    return next;
-                  });
-                }}
-                title="Remove this view"
-              >
-                ×
-              </span>
+              Main
             </button>
-          ))}
 
-          <button
-            type="button"
-            disabled={mergeSel.size < 2}
-            onClick={() => {
-              if (!onMergeSelectedViews) return;
-              onMergeSelectedViews(Array.from(mergeSel));
-              setMergeSel(new Set());
-            }}
-            style={{
-              marginLeft: 'auto',
-              fontSize: 11,
-              padding: '2px 10px',
-              borderRadius: 999,
-              border: '1px solid #d0d7de',
-              background: mergeSel.size < 2 ? '#f6f8fa' : '#ffffff',
-              cursor: mergeSel.size < 2 ? 'not-allowed' : 'pointer',
-              opacity: mergeSel.size < 2 ? 0.6 : 1,
-            }}
-            title="Ctrl/Cmd-click 2+ views, then merge"
-          >
-            Merge selected
-          </button>
+            {views.map((v) => (
+              <button
+                key={v.id}
+                type="button"
+                className={`kg-chip ${activeViewId === v.id ? 'kg-chip--active' : ''}`}
+                onClick={(e) => {
+                  if (e.ctrlKey || e.metaKey) toggleMergeSel(v.id);
+                  else {
+                    setMergeSel(new Set());
+                    onActivateView && onActivateView(v.id);
+                  }
+                }}
+                title="Click to switch. Ctrl/Cmd-click to select for merging."
+                style={{
+                  outline: mergeSel.has(v.id) ? '2px solid #111' : 'none',
+                  outlineOffset: 2,
+                }}
+              >
+                <span>{v.label}</span>
+                <span
+                  className="kg-chip-x"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRemoveView && onRemoveView(v.id);
+                    setMergeSel((prev) => {
+                      const next = new Set(prev);
+                      next.delete(v.id);
+                      return next;
+                    });
+                  }}
+                  title="Remove this view"
+                >
+                  ×
+                </span>
+              </button>
+            ))}
+
+            <button
+              type="button"
+              className="kg-chip kg-chip-clear"
+              disabled={mergeSel.size < 2}
+              onClick={() => {
+                if (!onMergeSelectedViews) return;
+                onMergeSelectedViews(Array.from(mergeSel));
+                setMergeSel(new Set());
+              }}
+              title="Ctrl/Cmd-click 2+ views, then merge"
+              style={{
+                opacity: mergeSel.size < 2 ? 0.6 : 1,
+                cursor: mergeSel.size < 2 ? 'not-allowed' : 'pointer',
+              }}
+            >
+              Merge selected views
+            </button>
+          </div>
         </div>
       )}
 
-      {/* hidden inputs for imports */}
+      {/* hidden inputs */}
       <input
         type="file"
         ref={jsonInputRef}

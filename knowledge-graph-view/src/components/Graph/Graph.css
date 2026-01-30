@@ -6,18 +6,17 @@
   flex-direction: column;
   gap: 8px;
   height: 100vh;
-  overflow: hidden;
+  overflow: visible;
   flex: 1;
 }
 
 /* container strip that holds the toolbar */
 .kg-graph-toolbar {
   display: flex;
-  align-items: center;
-  padding: 8px 10px;
-  border-radius: 10px;
-  background: #ffffff;
-  border: 1px solid #e5e7eb;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  overflow: visible;
 }
 
 /* hint + canvas */
