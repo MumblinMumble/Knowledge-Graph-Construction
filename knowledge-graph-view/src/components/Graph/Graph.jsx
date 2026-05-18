@@ -50,6 +50,7 @@ export default function Graph() {
 
   // Search bar text (Toolbar)
   const [command, setCommand] = useState('');
+  const searchCycleRef = useRef({ key: '', index: -1 });
 
   // Focus behavior
   const [includeNeighbors, setIncludeNeighbors] = useState(true);
@@ -102,8 +103,8 @@ export default function Graph() {
   const selRef = useRef({ nodes: new Set(), edges: new Set() }); // ids as strings
   const lastPointerModsRef = useRef({ ctrl: false, meta: false });
   const BIG_IMPORT_THRESHOLD = 6000;
-  const BATCH_SIZE_NODES = 3000;
-  const BATCH_SIZE_EDGES = 4000;
+  const BATCH_SIZE_NODES = 1000;
+  const BATCH_SIZE_EDGES = 1500;
 
   // Export helpers
   const { namedNode, blankNode, literal } = DataFactory;
@@ -316,6 +317,33 @@ export default function Graph() {
     [network],
   );
 
+  const freezeCurrentLayout = useCallback(() => {
+    if (!network) return;
+
+    try {
+      network.releaseNode?.();
+      network.stopSimulation?.();
+      network.setOptions({ physics: { enabled: false } });
+
+      const ds = network.body?.data?.nodes;
+      const ids = ds?.getIds?.() || [];
+      if (!ids.length || !ds?.update) return;
+
+      const positions = network.getPositions(ids);
+      ds.update(
+        ids.map((id) => ({
+          id,
+          x: positions[id]?.x,
+          y: positions[id]?.y,
+          fixed: false,
+          physics: false,
+        })),
+      );
+    } catch {
+      // Best effort: search/reset should never fail because freezing did.
+    }
+  }, [network]);
+
   // Panel positioning
   const clampToContainer = useCallback(
     (x, y) => {
@@ -380,6 +408,34 @@ export default function Graph() {
       });
     },
     [network, repositionPopup],
+  );
+
+  const zoomToNodeIds = useCallback(
+    (nodeIds) => {
+      if (!network) return;
+
+      const ids = Array.from(new Set((nodeIds || []).map(String))).filter(Boolean);
+      if (!ids.length) return;
+
+      const positions = network.getPositions(ids);
+      const points = ids
+        .map((id) => positions[id])
+        .filter((p) => Number.isFinite(p?.x) && Number.isFinite(p?.y));
+      if (!points.length) return;
+
+      const center = points.reduce(
+        (acc, p) => ({ x: acc.x + p.x / points.length, y: acc.y + p.y / points.length }),
+        { x: 0, y: 0 },
+      );
+
+      animateTo({
+        position: center,
+        scale: points.length === 1 ? 2.0 : 1.35,
+        duration: 500,
+        easing: 'easeInOutCubic',
+      });
+    },
+    [animateTo, network],
   );
 
   // Interactions
@@ -843,9 +899,24 @@ export default function Graph() {
 
       network.setSelection({ nodes: nodesStr, edges: edgesStr }, { unselectAll: true });
 
-      if (focus && nodesStr.length) {
-        network.focus(nodesStr[0], { scale: 1, animation: { duration: 300 } });
+      if (!focus || !nodesStr.length) return;
+
+      network.releaseNode?.();
+      network.redraw();
+
+      if (nodesStr.length === 1) {
+        network.focus(nodesStr[0], {
+          scale: 1,
+          locked: false,
+          animation: { duration: 300 },
+        });
+        return;
       }
+
+      network.fit({
+        nodes: nodesStr,
+        animation: { duration: 300, easingFunction: 'easeInOutQuad' },
+      });
     },
     [network],
   );
@@ -1001,7 +1072,14 @@ export default function Graph() {
 
           if (!marqueeAdditiveRef.current) {
             const first = Array.from(nextNodesSet)[0];
-            if (first) network.focus(first, { scale: 1, animation: { duration: 0 } });
+            if (first) {
+              network.releaseNode?.();
+              network.focus(first, {
+                scale: 1,
+                locked: false,
+                animation: { duration: 0 },
+              });
+            }
           }
 
           suppressNextClickRef.current = true;
@@ -1107,11 +1185,14 @@ export default function Graph() {
           if (!network) return;
 
           if (safeGraph.nodes.length === 1) {
+            network.releaseNode?.();
             network.focus(String(safeGraph.nodes[0].id), {
               scale: 1.6,
+              locked: false,
               animation: { duration: 300 },
             });
           } else {
+            network.releaseNode?.();
             network.fit({ animation: { duration: 300 } });
           }
         };
@@ -1594,43 +1675,64 @@ export default function Graph() {
     }
 
     if (!results.nodes.length && !results.edges.length) {
+      searchCycleRef.current = { key: '', index: -1 };
       notify('No matches found', 'info');
       network?.unselectAll();
       return;
     }
 
-    // Collect node + edge ids
-    let nodeIds = results.nodes.map((n) => n.id);
-    let edgeIds = results.edges.map((e) => e.id);
+    const cycleItems = results.nodes.length ? results.nodes : results.edges;
+    const cycleKey = [
+      searchTarget,
+      propKey || '',
+      q,
+      results.nodes.map((n) => String(n.id)).join(','),
+      results.edges.map((e) => String(e.id)).join(','),
+    ].join('|');
 
-    // If we have edge matches, make sure we also include their endpoints
-    if (results.edges.length) {
-      const extra = new Set(nodeIds);
-      results.edges.forEach((e) => {
-        extra.add(e.from);
-        extra.add(e.to);
-      });
-      nodeIds = Array.from(extra);
-    } else if (!results.edges.length && nodeIds.length) {
-      // No direct edge matches, but some node matches:
-      // include their incident edges to give context
+    const prevCycle = searchCycleRef.current;
+    const cycleIndex =
+      prevCycle.key === cycleKey
+        ? (prevCycle.index + 1) % cycleItems.length
+        : 0;
+    searchCycleRef.current = { key: cycleKey, index: cycleIndex };
+
+    const pickedNode = results.nodes.length ? results.nodes[cycleIndex] : null;
+    const pickedEdge = !pickedNode && results.edges.length ? results.edges[cycleIndex] : null;
+
+    let nodeIds = pickedNode ? [pickedNode.id] : [];
+    let edgeIds = pickedEdge ? [pickedEdge.id] : [];
+
+    if (pickedEdge) {
+      nodeIds = [pickedEdge.from, pickedEdge.to];
+    } else if (pickedNode) {
       const incEdges = graphData.edges.filter(
-        (e) => nodeIds.includes(e.from) || nodeIds.includes(e.to),
+        (e) => String(e.from) === String(pickedNode.id) || String(e.to) === String(pickedNode.id),
       );
       edgeIds = incEdges.map((e) => e.id);
     }
 
-    selectNodesAndEdges(nodeIds, edgeIds);
+    freezeCurrentLayout();
+    selectNodesAndEdges(nodeIds, edgeIds, { focus: false });
+    requestAnimationFrame(() => zoomToNodeIds(nodeIds));
 
     // Open panel when exactly one thing matched
-    if (results.nodes.length === 1 && !results.edges.length) {
-      showPanelForNode(results.nodes[0].id);
-    } else if (results.edges.length === 1 && !results.nodes.length) {
-      showPanelForEdge(results.edges[0].id);
+    if (pickedNode) {
+      showPanelForNode(pickedNode.id);
+    } else if (pickedEdge) {
+      showPanelForEdge(pickedEdge.id);
     }
 
+    const pickedLabel =
+      pickedNode?.label ||
+      pickedNode?.name ||
+      pickedEdge?.label ||
+      pickedNode?.id ||
+      pickedEdge?.id ||
+      'match';
+    const totalMatches = cycleItems.length;
     notify(
-      `Matched ${results.nodes.length} node(s), ${results.edges.length} edge(s)`,
+      `Matched ${results.nodes.length} node(s), ${results.edges.length} edge(s). Showing ${cycleIndex + 1}/${totalMatches}: ${pickedLabel}`,
       'info',
     );
   };
@@ -1800,11 +1902,13 @@ export default function Graph() {
     notify('Focus cleared', 'info');
   }, [activateView, notify]);
 
-  const fitToScreen = () =>
-    network?.fit({
-      animation: { duration: 300, easingFunction: 'easeInOutQuad' },
-      offset: { x: 0, y: -60 },
-    });
+  const fitToScreen = () => {
+    if (!network) return;
+
+    freezeCurrentLayout();
+    network.redraw();
+    network.fit({ animation: false });
+  };
 
   return (
     <div className="kg-graph">
@@ -1978,6 +2082,7 @@ export default function Graph() {
         onAdd={(label) => {
           skipVisSyncRef.current = false;
           suspendLayoutRef.current = true;
+          freezeCurrentLayout();
 
           const maxId = graphData.nodes.reduce((m, n) => {
             const v = Number(n.id);
@@ -1998,16 +2103,27 @@ export default function Graph() {
             name: text || `Node ${nextId}`,
             label: text || `Node ${nextId}`,
             ...(spawn
-              ? { x: spawn.x, y: spawn.y, fixed: { x: true, y: true }, physics: false }
+              ? { x: spawn.x, y: spawn.y, fixed: false, physics: false }
               : {}),
           };
 
           const pushed = pushVisNodeImmediate(newNode);
 
-          setGraphData((prev) => ({
-            nodes: [...prev.nodes, newNode],
-            edges: prev.edges,
-          }));
+          setGraphData((prev) => {
+            const ids = prev.nodes.map((n) => String(n.id));
+            const positions = network?.getPositions?.(ids) || {};
+            const nodesWithCurrentPositions = prev.nodes.map((n) => {
+              const pos = positions[String(n.id)];
+              return pos
+                ? { ...n, x: pos.x, y: pos.y, fixed: false, physics: false }
+                : { ...n, fixed: false, physics: false };
+            });
+
+            return {
+              nodes: [...nodesWithCurrentPositions, newNode],
+              edges: prev.edges,
+            };
+          });
           setQuickAdd(null);
 
           const idStr = String(nextId);
@@ -2028,16 +2144,12 @@ export default function Graph() {
               setSelected({ type: 'Node', data: newNode });
               setPopupNearNode(nextId);
             } finally {
-              setTimeout(() => {
-                suspendLayoutRef.current = false;
-              }, 650);
-
               const unpinOnce = (params) => {
                 if (params.nodes && params.nodes.map(String).includes(idStr)) {
                   setGraphData((prev) => ({
                     ...prev,
                     nodes: prev.nodes.map((n) =>
-                      n.id === nextId ? { ...n, fixed: false, physics: true } : n,
+                      n.id === nextId ? { ...n, fixed: false, physics: false } : n,
                     ),
                   }));
                   network.off('dragEnd', unpinOnce);

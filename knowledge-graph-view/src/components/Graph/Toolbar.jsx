@@ -303,7 +303,7 @@ export default function Toolbar(props) {
         {/* Group 6: View*/}
         <div
           className="kg-tb-group kg-tb-group-layout"
-          data-tooltip="Creation of views from the current graph view based on whats selected"
+          data-tooltip="Creation of views from the current graph view based on whats selected with or without neighbours"
         >
           <button
             type="button"
@@ -320,7 +320,6 @@ export default function Toolbar(props) {
               includeNeighbors ? 'kg-secondary-pill--active' : ''
             }`}
             onClick={() => setIncludeNeighbors((v) => !v)}
-            title="When on, Focus includes 1-hop neighbors of selected nodes"
           >
             Include Neighbors: {includeNeighbors ? 'On' : 'Off'}
           </button>

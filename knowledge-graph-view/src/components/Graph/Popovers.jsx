@@ -412,23 +412,20 @@ export const GuideModal = ({ open, onClose }) => {
         <Section title="🎛️ Toolbar buttons">
           <ul style={{ margin: '6px 0 0 18px', padding: 0 }}>
             <li>
-              <b>Center</b>: fit/center graph on screen
+              <b>Reset Screen</b>: fit/center graph on screen
+            </li>
+            <li>
+              <b>Color By</b>: color nodes/edges by label/type/custom key
             </li>
             <li>
               <b>Layout</b>: switch force / hierarchical
             </li>
             <li>
-              <b>Advanced → Color</b>: color nodes/edges by label/type/custom key
-            </li>
-            <li>
-              <b>Focus selection</b>: saves a new view from selection (optionally includes
-              1-hop neighbors)
+              <b>Save View</b>: saves a new view from selection (optionally includes 1-hop
+              neighbors)
             </li>
             <li>
               <b>Neighbors toggle</b>: includes 1-hop neighbors when focusing
-            </li>
-            <li>
-              <b>Clear focus</b>: return to Main view
             </li>
           </ul>
         </Section>

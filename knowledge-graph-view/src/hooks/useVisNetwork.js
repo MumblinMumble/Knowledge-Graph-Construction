@@ -44,8 +44,10 @@ export default function useVisNetwork() {
     setNet(instance);
 
     const handleResize = () => {
+      instance.setSize('100%', '100%');
       instance.redraw();
     };
+
     window.addEventListener('resize', handleResize);
 
     return () => {

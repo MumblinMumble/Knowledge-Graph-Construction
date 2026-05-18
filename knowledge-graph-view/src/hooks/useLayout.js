@@ -12,6 +12,7 @@ export default function useLayout(networkRef, network /*, graphData */) {
         ds.update(
           ids.map((id) => ({
             id,
+            fixed: false,
             physics: false,
           })),
         );
